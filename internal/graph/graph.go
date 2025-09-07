@@ -142,3 +142,13 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		Edges: edges,
 	})
 }
+
+func (g *Graph) Touch(n string) {
+	if n == "" {
+		return
+	}
+
+	if _, ok := g.edges[n]; !ok {
+		g.edges[n] = make(map[string]struct{})
+	}
+}

@@ -19,6 +19,7 @@ var (
 	reImportBare = regexp.MustCompile(`(?m)^\s*import\s+['"]([^'"]+)['"]`)
 	reRequire    = regexp.MustCompile(`(?m)require\(\s*['"]([^'"]+)['"]\s*\)`)
 	reDynamic    = regexp.MustCompile(`(?m)import\(\s*['"]([^'"]+)['"]\s*\)`)
+	reExportFrom = regexp.MustCompile(`(?m)^\s*export\s+.*?\sfrom\s+['"]([^'"]+)['"]`)
 )
 
 func isSource(path string) bool {
@@ -74,10 +75,9 @@ func ParseImports(content string) []string {
 	add(reImportBare.FindAllStringSubmatch(content, -1))
 	add(reRequire.FindAllStringSubmatch(content, -1))
 	add(reDynamic.FindAllStringSubmatch(content, -1))
-
+	add(reExportFrom.FindAllStringSubmatch(content, -1))
 
 	// Normalize, ignore style/assets and node builtins
-
 	out := make([]string, 0, len(seen))
 	for module := range seen {
 		l := strings.ToLower(module)
@@ -97,9 +97,10 @@ func ParseImports(content string) []string {
 // This currently only hands relative paths
 func Resolve(fromFile, spec string) (string, error) {
 	// Leave non-relative imports (packages, absolute aliases) as is for now.
-	if !(strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../")) {
-		return "", fmt.Errorf("non-relative import %q: cannot gaurantee existence", spec)
+	if !(strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../") || strings.HasPrefix(spec, "/")) {
+		return "pkg:" + spec, nil
 	}
+
 
 	// Build a candidate path.
 	// Find the directory of fromFile, join it with spec to get the target path and remove the relative path
@@ -152,8 +153,7 @@ func Resolve(fromFile, spec string) (string, error) {
 		attempts = []string{candidate}
 	}
 
-	return "", fmt.Errorf("could not resolve %q from %q; tried: %v",
-		spec, fromFile, attempts)
+	return "", fmt.Errorf("could not resolve %q from %q; tried: %v", spec, fromFile, attempts)
 }
 
 // Walks through a source tree, parses imports, and builds a directed dependency graph concurrently.
@@ -244,30 +244,32 @@ func BuildGraph(ctx context.Context, root string) (*graph.Graph, error) {
 				continue
 			}
 
+			g.Touch(r.File)
+
 			for _, spec := range r.Imports {
-			to, err := Resolve(r.File, spec)
-			if err != nil {
-				unresolved = append(unresolved, Unresolved{
-					File: r.File,
-					Spec: spec,
-					Err:  err,
-				})
-				continue
-			}
-			g.AddEdge(r.File, to)
-				// Only verify relative specs; package/alias imports are left as-is.
+				to, err := Resolve(r.File, spec)
+				if err != nil {
+					// Only treat as unresolved if it was a relative spec;
+					// externals are now dropped/kept without error.
+					if isRelativeImport(spec) {
+						unresolved = append(unresolved, Unresolved{File: r.File, Spec: spec, Err: err})
+					}
+					continue
+				}
+				if to == "" {
+					// dropped external (Option A)
+					continue
+				}
+
+				// If it’s relative, sanity-check the resolved path exists (defensive)
 				if isRelativeImport(spec) {
-					if info, err := os.Stat(to); err != nil || info.IsDir() {
-						// record failure; skip adding the edge
-						reason := err
-						if err == nil && info.IsDir() {
-							reason = fmt.Errorf("resolved to directory (no index file): %s", to)
+					info, statErr := os.Stat(to)
+					if statErr != nil || info.IsDir() {
+						reason := statErr
+						if statErr == nil && info.IsDir() {
+							reason = fmt.Errorf("resolved to directory without index: %s", to)
 						}
-						unresolved = append(unresolved, Unresolved{
-							File: r.File,
-							Spec: spec,
-							Err:  reason,
-						})
+						unresolved = append(unresolved, Unresolved{File: r.File, Spec: spec, Err: reason})
 						continue
 					}
 				}
