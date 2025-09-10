@@ -13,8 +13,6 @@ import (
 	"github.com/philjestin/philtographer/internal/scan"
 )
 
-// scanCmd wires your existing scan.BuildGraph(ctx, root) behind a CLI subcommand.
-// It keeps the same behavior you had with flags, but now supports config/env too.
 var scanCmd = &cobra.Command{
 	Use:   "scan",
 	Short: "Scan the workspace and output the dependency graph",
@@ -23,7 +21,7 @@ var scanCmd = &cobra.Command{
 		root := viper.GetString("root")
 		out := viper.GetString("out")
 
-		// ctx lets us cancel a long walk; matches your previous pattern.
+		// ctx lets us cancel a long walk
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 

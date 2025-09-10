@@ -15,7 +15,7 @@ It scans your source tree, discovers entry points (roots), and produces a machin
 Clone the repo and build:
 
 ```bash
-git clone https://github.com/your-org/philtographer.git
+git clone https://github.com/philjestin/philtographer.git
 cd philtographer
 make build
 ```

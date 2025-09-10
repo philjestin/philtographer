@@ -23,7 +23,6 @@ var (
 	reExportFrom = regexp.MustCompile(`(?m)^\s*export\s+.*?\sfrom\s+['"]([^'"]+)['"]`)
 )
 
-// isSource: keep your original behavior; feel free to expand to .js/.jsx if your tree has them.
 func isSource(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 

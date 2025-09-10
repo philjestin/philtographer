@@ -1,7 +1,7 @@
 .PHONY: build run test clean
 
-APP := philtographer          # binary name
-MAIN := ./cmd/rg              # <-- set this to your main package dir
+APP := philtographer
+MAIN := ./cmd/rg
 
 build:
 	go build -o bin/$(APP) $(MAIN)
