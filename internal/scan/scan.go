@@ -19,7 +19,7 @@ var (
 	reImportFrom = regexp.MustCompile(`(?m)^\s*import(?:\s+type)?\s+.*?from\s+['"]([^'"]+)['"]`)
 	reImportBare = regexp.MustCompile(`(?m)^\s*import\s+['"]([^'"]+)['"]`)
 	reRequire    = regexp.MustCompile(`(?m)require\(\s*['"]([^'"]+)['"]\s*\)`)
-	reDynamic    = regexp.MustCompile(`(?m)import\(\s*['"]([^'"]+ )['"]\s*\)`)
+	reDynamic    = regexp.MustCompile(`(?m)import\(\s*['"]([^'"]+)['"]\s*\)`)
 	reExportFrom = regexp.MustCompile(`(?m)^\s*export\s+.*?\sfrom\s+['"]([^'"]+)['"]`)
 )
 
@@ -296,13 +296,6 @@ func FirstLines(path string, n int) (string, error) {
 	}
 
 	return strings.Join(lines, "\n"), sc.Err()
-}
-
-// Entry describes a single traversal seed. We keep it tiny so callers can label roots
-// if they want to (Name is optional for now).
-type Entry struct {
-	Name string
-	Path string
 }
 
 // BuildGraphFromEntries: multi-root, entry-driven traversal.

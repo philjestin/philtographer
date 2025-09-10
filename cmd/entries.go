@@ -14,6 +14,12 @@ import (
 	"github.com/philjestin/philtographer/internal/scan/providers"
 )
 
+// CLI flags (local to this subcommand)
+var (
+	printEntries bool // if true, list discovered entries then exit (no graph build)
+	verbose      bool // if true, print extra diagnostics to stderr
+)
+
 // entriesCmd builds a graph by first discovering roots via providers specified in config.
 // It targets the "multi root / MPA" use case (e.g., Rails + many React roots).
 var entriesCmd = &cobra.Command{
@@ -33,16 +39,27 @@ var entriesCmd = &cobra.Command{
 			out = cfg.Out
 		}
 
+		if verbose {
+			fmt.Fprintln(os.Stderr, "[entries] root =", cfg.Root, "out =", out)
+			fmt.Fprintln(os.Stderr, "[entries] provider specs =", len(cfg.Entries))
+		}
+
 		// 2) Build providers from cfg. For now: rootsTs, explicit. Extend here as you add more types.
 		var provs []providers.Provider
 		for _, spec := range cfg.Entries {
 			switch spec.Type {
 			case "rootsTs":
+				if verbose {
+					fmt.Fprintln(os.Stderr, "[entries] add rootsTs provider file:", spec.File, "nameFrom:", spec.NameFrom)
+				}
 				provs = append(provs, providers.RootsTsProvider{
 					File:     spec.File,
 					NameFrom: spec.NameFrom, // "objectKey" | "webpackChunkName"
 				})
 			case "explicit":
+				if verbose {
+					fmt.Fprintln(os.Stderr, "[entries] add explicit provider", spec.Name, "->", spec.Path)
+				}
 				provs = append(provs, providers.ExplicitProvider{
 					Name: spec.Name,
 					Path: spec.Path,
@@ -70,6 +87,20 @@ var entriesCmd = &cobra.Command{
 				}
 			}
 		}
+
+		if verbose {
+			fmt.Fprintln(os.Stderr, "[entries] discovered entries:", len(entries))
+		}
+
+		// If --print-entries is on, list them to stderr and exit early.
+		if printEntries {
+			for _, e := range entries {
+				fmt.Fprintf(os.Stderr, "• %s  %s\n", e.Name, e.Path)
+			}
+			// Early return: don't build the graph.
+			return nil
+		}
+
 		if len(entries) == 0 {
 			return fmt.Errorf("no entries discovered; check your config")
 		}
@@ -103,5 +134,8 @@ var entriesCmd = &cobra.Command{
 }
 
 func init() {
+	// Register subcommand and its flags.
 	rootCmd.AddCommand(entriesCmd)
+	entriesCmd.Flags().BoolVar(&printEntries, "print-entries", false, "print discovered entries and exit")
+	entriesCmd.Flags().BoolVar(&verbose, "verbose", false, "verbose logging (providers, matches, paths)")
 }
