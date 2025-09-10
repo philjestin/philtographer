@@ -1,0 +1,50 @@
+# Binaries
+/bin/
+/philtographer
+./bin/philtographer
+./bin/rg
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+
+# Coverage files
+*.out
+coverage/
+
+# Go build cache & modules
+*.log
+*.tmp
+*.swp
+*.swo
+*.err
+/go.work
+/go.work.sum
+
+# IDE/editor junk
+.vscode/
+.idea/
+*.iml
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Dependency graphs / output
+graph.json
+*.dot
+*.png
+
+# Tools caches
+.turbo/
+.cache/
+
+# Local config
+philtographer.config.json
+philtographer.config.yaml
+
+graph.json
