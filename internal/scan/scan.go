@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic" // ADDED: used to safely track in-flight queue items for clean shutdown
 
 	"github.com/philjestin/philtographer/internal/graph"
 )
@@ -18,10 +19,11 @@ var (
 	reImportFrom = regexp.MustCompile(`(?m)^\s*import(?:\s+type)?\s+.*?from\s+['"]([^'"]+)['"]`)
 	reImportBare = regexp.MustCompile(`(?m)^\s*import\s+['"]([^'"]+)['"]`)
 	reRequire    = regexp.MustCompile(`(?m)require\(\s*['"]([^'"]+)['"]\s*\)`)
-	reDynamic    = regexp.MustCompile(`(?m)import\(\s*['"]([^'"]+)['"]\s*\)`)
+	reDynamic    = regexp.MustCompile(`(?m)import\(\s*['"]([^'"]+ )['"]\s*\)`)
 	reExportFrom = regexp.MustCompile(`(?m)^\s*export\s+.*?\sfrom\s+['"]([^'"]+)['"]`)
 )
 
+// isSource: keep your original behavior; feel free to expand to .js/.jsx if your tree has them.
 func isSource(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 
@@ -34,15 +36,15 @@ func isSource(path string) bool {
 }
 
 type Result struct {
-	File string
+	File    string
 	Imports []string
-	Err error
+	Err     error
 }
 
 type Unresolved struct {
 	File string
 	Spec string
-	Err error
+	Err  error
 }
 
 func isRelativeImport(spec string) bool {
@@ -93,7 +95,7 @@ func ParseImports(content string) []string {
 // fromFile is the file that contains the import
 // spec is the import string from that file
 // This returns the resolved file path
-
+//
 // This currently only hands relative paths
 func Resolve(fromFile, spec string) (string, error) {
 	// Leave non-relative imports (packages, absolute aliases) as is for now.
@@ -101,12 +103,11 @@ func Resolve(fromFile, spec string) (string, error) {
 		return "pkg:" + spec, nil
 	}
 
-
 	// Build a candidate path.
 	// Find the directory of fromFile, join it with spec to get the target path and remove the relative path
 	// string safely
 	base := filepath.Dir(fromFile)
-	candidate := filepath.Clean(filepath.Join(base,spec))
+	candidate := filepath.Clean(filepath.Join(base, spec))
 
 	// exact path as given, if it already has an extension
 	if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
@@ -217,7 +218,6 @@ func BuildGraph(ctx context.Context, root string) (*graph.Graph, error) {
 
 	unresolved := make([]Unresolved, 0, 64)
 
-
 	// Consume results
 	for {
 		select {
@@ -296,4 +296,101 @@ func FirstLines(path string, n int) (string, error) {
 	}
 
 	return strings.Join(lines, "\n"), sc.Err()
+}
+
+// Entry describes a single traversal seed. We keep it tiny so callers can label roots
+// if they want to (Name is optional for now).
+type Entry struct {
+	Name string
+	Path string
+}
+
+// BuildGraphFromEntries: multi-root, entry-driven traversal.
+// This walks only the reachable dependency closure starting from the given entries,
+// which is better for MPAs (Rails + many React roots) and faster on large repos.
+func BuildGraphFromEntries(ctx context.Context, root string, entries []Entry) (*graph.Graph, error) {
+	g := graph.New()
+
+	// queue carries files to visit; we close it automatically when "inflight" hits zero.
+	queue := make(chan string, 4096)
+
+	// visited ensures we process each file at most once (prevents cycles & duplicate work).
+	visited := make(map[string]struct{})
+	var mu sync.Mutex
+
+	// inflight tracks how many items have been enqueued but not fully processed
+	// (safe across goroutines). When it reaches zero, we close the queue.
+	var inflight int64
+
+	// enqueue adds a path to the queue exactly once and bumps the inflight counter.
+	enqueue := func(p string) {
+		mu.Lock()
+		if _, seen := visited[p]; !seen {
+			visited[p] = struct{}{}
+			atomic.AddInt64(&inflight, 1)
+			queue <- p
+		}
+		mu.Unlock()
+	}
+
+	// Seed the traversal with the provided entries (resolve relative to root).
+	for _, e := range entries {
+		start := e.Path
+		if !filepath.IsAbs(start) {
+			start = filepath.Clean(filepath.Join(root, start))
+		}
+		enqueue(start)
+	}
+
+	// Spin up workers to process the queue concurrently.
+	workers := runtime.NumCPU()
+	var wg sync.WaitGroup
+	wg.Add(workers)
+
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case path, ok := <-queue:
+					if !ok {
+						// queue closed: nothing more to do for this worker
+						return
+					}
+
+					// Read file and parse imports. Errors are non-fatal: we just skip the file.
+					data, err := os.ReadFile(path)
+					if err == nil {
+						g.Touch(path)
+						for _, spec := range ParseImports(string(data)) {
+							to, rerr := Resolve(path, spec)
+							if rerr == nil {
+								// Record the edge no matter if it's internal or external (pkg:...).
+								g.AddEdge(path, to)
+
+								// Only enqueue reachable local files (skip pkg: externals)
+								if isRelativeImport(spec) {
+									if info, statErr := os.Stat(to); statErr == nil && !info.IsDir() {
+										enqueue(to)
+									}
+								}
+							}
+						}
+					}
+
+					// Mark this item as fully processed. If this was the last in-flight item,
+					// close the queue so all workers can drain and exit.
+					if atomic.AddInt64(&inflight, -1) == 0 {
+						close(queue)
+					}
+				}
+			}
+		}()
+	}
+
+	// Wait for all workers to finish or context cancellation.
+	wg.Wait()
+	return g, ctx.Err()
 }

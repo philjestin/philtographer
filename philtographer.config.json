@@ -1,0 +1,11 @@
+{
+  "root": ".",
+  "out": "graph.json",
+  "entries": [
+    {
+      "type": "rootsTs",
+      "file": "/Users/pmiddleton/workspace/handshake/handshake/next/clients/employer/src/roots.ts",
+      "nameFrom": "objectKey"
+    }
+  ]
+}

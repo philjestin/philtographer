@@ -16,11 +16,10 @@ type Graph struct {
 
 func New() *Graph {
 	return &Graph{
-		edges: make(map[string]map[string]struct{}),
+		edges:   make(map[string]map[string]struct{}),
 		reverse: make(map[string]map[string]struct{}),
 	}
 }
-
 
 // This basically helps make sure that we can traverse the graph backwards
 // which helps for topological sort and dependency resolution (key)
@@ -52,7 +51,6 @@ func (g *Graph) AddEdge(from, to string) {
 	// This adds from into the set of inbound neighbors for to
 	g.reverse[to][from] = struct{}{}
 }
-
 
 // Collects all of the unique nodes in the graph, whether they appear as a source
 // or destination. Return them in a slice of strings, and ensures they are sorted.
@@ -92,9 +90,15 @@ func (g *Graph) Impacted(start string) []string {
 	// Create a recursive closure inside of Impacted
 	// it looks at all predecessors of node (all nodes that point to node)
 	dfs = func(node string) {
+		// ADDED: nil-guard so looking up a node with no predecessors (or unknown node)
+		// does not panic with a map access on a missing key.
+		preds, ok := g.reverse[node]
+		if !ok {
+			return
+		}
 		// For each predecessor predecessor, if it has not been visited
 		// mark it as so and recursively search its predecessors
-		for predecessor := range g.reverse[node] {
+		for predecessor := range preds {
 			if !visited[predecessor] {
 				visited[predecessor] = true
 				dfs(predecessor)
@@ -136,7 +140,7 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 	// creates an anonymous struct with two fields.
 	return json.Marshal(struct {
 		Nodes []string `json:"nodes"`
-		Edges []edge `json:"edges"`
+		Edges []edge   `json:"edges"`
 	}{
 		Nodes: g.Nodes(),
 		Edges: edges,
@@ -150,5 +154,11 @@ func (g *Graph) Touch(n string) {
 
 	if _, ok := g.edges[n]; !ok {
 		g.edges[n] = make(map[string]struct{})
+	}
+
+	// ADDED: keep reverse map in sync so lookups like g.reverse[n]
+	// are always safe (even for isolated/touched nodes).
+	if _, ok := g.reverse[n]; !ok {
+		g.reverse[n] = make(map[string]struct{})
 	}
 }
