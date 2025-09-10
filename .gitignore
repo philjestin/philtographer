@@ -1,6 +1,8 @@
 # Binaries
 /bin/
 /philtographer
+./bin/philtographer
+./bin/rg
 *.exe
 *.exe~
 *.dll
