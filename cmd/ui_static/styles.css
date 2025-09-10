@@ -1,0 +1,60 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+header h1 {
+  font-size: 16px;
+  margin: 0;
+}
+
+header input[type="search"] {
+  flex: 1;
+  max-width: 420px;
+  padding: 6px 8px;
+}
+
+main {
+  width: 100%;
+  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0; /* allow flex child to fill viewport */
+}
+
+#graph {
+  width: 100%;
+  height: 100%;
+  display: block; /* avoid inline svg baseline gap */
+  background: #fafafa;
+}
+
+.link {
+  stroke: #aaa;
+  stroke-opacity: 0.6;
+}
+
+.node circle {
+  stroke: #fff;
+  stroke-width: 1.5px;
+}
+
+.node text {
+  font-size: 10px;
+  pointer-events: none;
+}

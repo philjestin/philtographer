@@ -159,3 +159,16 @@ After generating a graph, you can use the Go API directly (`graph.Impacted("path
 
 ---
 
+## UI (Force-Directed Graph Viewer)
+
+Serve a lightweight UI to visualize a previously generated `graph.json`:
+
+```bash
+philtographer ui --graph ./graph.json --addr :8080
+```
+
+Then open `http://localhost:8080`.
+
+- `--graph`: path to the JSON graph file (required)
+- `--addr`: address to listen on (default `:8080`)
+
