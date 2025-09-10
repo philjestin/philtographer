@@ -90,7 +90,7 @@ func (g *Graph) Impacted(start string) []string {
 	// Create a recursive closure inside of Impacted
 	// it looks at all predecessors of node (all nodes that point to node)
 	dfs = func(node string) {
-		// ADDED: nil-guard so looking up a node with no predecessors (or unknown node)
+		// nil-guard so looking up a node with no predecessors (or unknown node)
 		// does not panic with a map access on a missing key.
 		preds, ok := g.reverse[node]
 		if !ok {
@@ -156,7 +156,7 @@ func (g *Graph) Touch(n string) {
 		g.edges[n] = make(map[string]struct{})
 	}
 
-	// ADDED: keep reverse map in sync so lookups like g.reverse[n]
+	// keep reverse map in sync so lookups like g.reverse[n]
 	// are always safe (even for isolated/touched nodes).
 	if _, ok := g.reverse[n]; !ok {
 		g.reverse[n] = make(map[string]struct{})

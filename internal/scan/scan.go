@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic" // ADDED: used to safely track in-flight queue items for clean shutdown
+	"sync/atomic"
 
 	"github.com/philjestin/philtographer/internal/graph"
 )
