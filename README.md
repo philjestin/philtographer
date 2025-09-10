@@ -159,6 +159,3 @@ After generating a graph, you can use the Go API directly (`graph.Impacted("path
 
 ---
 
-## License
-
-MIT (or your preferred license).
