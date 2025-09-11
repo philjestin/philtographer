@@ -43,6 +43,22 @@ main {
   background: #fafafa;
 }
 
+#tooltip {
+  position: fixed;
+  z-index: 1000;
+  padding: 4px 6px;
+  background: rgba(17, 17, 17, 0.9);
+  color: #fff;
+  border-radius: 4px;
+  font-size: 11px;
+  pointer-events: none;
+  white-space: nowrap;
+  max-width: 70vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: none;
+}
+
 .link { stroke: #aaa; stroke-opacity: 0.6; }
 .node circle { stroke: #fff; stroke-width: 1.5px; }
 .node text { font-size: 10px; pointer-events: none; }

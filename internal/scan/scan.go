@@ -82,7 +82,7 @@ func ParseImports(content string) []string {
 	out := make([]string, 0, len(seen))
 	for module := range seen {
 		l := strings.ToLower(module)
-		if strings.HasSuffix(l, ".css") || strings.HasSuffix(l, ".scss") || strings.HasSuffix(l, ".less") {
+		if strings.HasSuffix(l, ".css") || strings.HasSuffix(l, ".scss") || strings.HasSuffix(l, ".less") || strings.HasSuffix(l, ".yml") {
 			continue
 		}
 		out = append(out, module)
