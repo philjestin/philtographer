@@ -98,6 +98,48 @@ Flags:
 
 ---
 
+### `components`
+
+Build a React component-to-component usage graph by walking from discovered entries and following TSX imports that are actually used in JSX.
+
+```bash
+./bin/philtographer components --config ./philtographer.config.json --out component-graph.json
+```
+
+- Uses the same entry providers as `entries` (`rootsTs`, `explicit`).
+- Requires `entries` configured in `philtographer.config.*`.
+- Progress is printed to stderr; output is JSON written to `--out` or stdout.
+
+---
+
+### `isolated`
+
+Print nodes that have no inbound or outbound edges in a previously generated graph JSON.
+
+```bash
+./bin/philtographer isolated --graph ./graph.json
+```
+
+- `--graph`: path to the graph JSON file (required)
+- Outputs one file path per line (sorted).
+
+---
+
+### `ui`
+
+Serve a small local UI to visualize a `graph.json` as a force‑directed graph in the browser.
+
+```bash
+./bin/philtographer ui --graph ./graph.json --addr :8080
+```
+
+- `--graph`: path to the JSON graph file (required)
+- `--addr`: address to listen on (default `:8080`)
+
+Then open `http://localhost:8080`.
+
+---
+
 ### Graph output format
 
 Both `scan` and `entries` produce JSON like:
@@ -110,8 +152,8 @@ Both `scan` and `entries` produce JSON like:
     "pkg:react"
   ],
   "edges": [
-    { "from": "src/components/Button.tsx", "to": "src/components/Icon.tsx" },
-    { "from": "src/components/Button.tsx", "to": "pkg:react" }
+    { "From": "src/components/Button.tsx", "To": "src/components/Icon.tsx" },
+    { "From": "src/components/Button.tsx", "To": "pkg:react" }
   ]
 }
 ```

@@ -52,17 +52,38 @@ func (r RootsTsProvider) Discover(ctx context.Context, workspaceRoot string) ([]
 			name = chunkName
 		}
 
-		// Compute absolute path for the entry file
+		// Compute absolute path for the entry file and resolve to a concrete TS/TSX file.
 		entryPath := importRel
 		if !filepath.IsAbs(entryPath) {
 			entryPath = filepath.Clean(filepath.Join(baseDir, importRel))
 		}
+		resolved := resolveTSXPath(entryPath)
+		if resolved == "" {
+			// Keep best-effort path; downstream may handle resolution
+			resolved = entryPath
+		}
 
 		entries = append(entries, scan.Entry{
 			Name: name,
-			Path: entryPath,
+			Path: resolved,
 		})
 	}
 
 	return entries, nil
+}
+
+func resolveTSXPath(candidate string) string {
+	try := []string{
+		candidate,
+		candidate + ".tsx",
+		candidate + ".ts",
+		filepath.Join(candidate, "index.tsx"),
+		filepath.Join(candidate, "index.ts"),
+	}
+	for _, p := range try {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
+		}
+	}
+	return ""
 }
