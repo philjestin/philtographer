@@ -11,6 +11,8 @@
   const minDegreeInput = document.getElementById('minDegree');
   const toggleLabels = document.getElementById('toggleLabels');
   const hideNonFocused = document.getElementById('hideNonFocused');
+  const layoutTreeBtn = document.getElementById('layoutTree');
+  const layoutForceBtn = document.getElementById('layoutForce');
   const tooltip = document.getElementById('tooltip');
 
   const hasPixi = typeof PIXI !== 'undefined';
@@ -71,7 +73,7 @@
   rebuildAdjacency();
 
   let { width, height } = initSize;
-  const simulation = d3.forceSimulation(nodes)
+  let simulation = d3.forceSimulation(nodes)
     .force('link', d3.forceLink(links).distance(40).strength(0.06))
     .force('charge', d3.forceManyBody().strength(-60))
     .force('center', d3.forceCenter(width / 2, height / 2))
@@ -121,6 +123,20 @@
   function drawEdges(alphaAll) { edgesLayer.clear(); edgesLayer.lineStyle(0.6, 0x999999, alphaAll ?? 0.25); for (const l of links) { edgesLayer.moveTo(l.source.x, l.source.y); edgesLayer.lineTo(l.target.x, l.target.y); } }
   simulation.on('tick', () => { for (const n of nodes) { const s = nodeSprite.get(n.id); if (s) s.position.set(n.x, n.y); const t = nodeLabel.get(n.id); if (t) t.position.set(n.x + 8, n.y); } drawEdges(); });
 
+  function bfsDirectional(startId, dir) {
+    const visited = new Set([startId]);
+    let frontier = new Set([startId]);
+    while (frontier.size) {
+      const next = new Set();
+      for (const id of frontier) {
+        if (dir !== 'in') for (const n of outAdj.get(id) || []) if (!visited.has(n)) { visited.add(n); next.add(n); }
+        if (dir !== 'out') for (const n of inAdj.get(id) || []) if (!visited.has(n)) { visited.add(n); next.add(n); }
+      }
+      frontier = next;
+    }
+    return visited;
+  }
+
   function bfs(startId, options) { const { maxDepth, direction } = options; const visited = new Set([startId]); let frontier = new Set([startId]); for (let depth = 0; depth < maxDepth; depth++) { const next = new Set(); for (const id of frontier) { if (direction !== 'in') for (const n of outAdj.get(id) || []) if (!visited.has(n)) { visited.add(n); next.add(n); } if (direction !== 'out') for (const n of inAdj.get(id) || []) if (!visited.has(n)) { visited.add(n); next.add(n); } } if (next.size === 0) break; frontier = next; } return visited; }
 
   function applyFocus(keep) { const hide = !!hideNonFocused?.checked; for (const n of nodes) { const visible = keep.has(n.id) || !hide; const alpha = keep.has(n.id) ? 1 : (hide ? 0 : 0.2); const s = nodeSprite.get(n.id); if (s) { s.alpha = alpha; s.renderable = visible; } const t = nodeLabel.get(n.id); if (t) { t.alpha = alpha; t.renderable = visible && labelsLayer.visible; } } edgesLayer.clear(); for (const l of links) { const show = keep.has(l.source.id) && keep.has(l.target.id); const alpha = show ? (hide ? 0.6 : 0.35) : (hide ? 0 : 0.05); if (alpha <= 0) continue; edgesLayer.lineStyle(0.6, 0x999999, alpha); edgesLayer.moveTo(l.source.x, l.source.y); edgesLayer.lineTo(l.target.x, l.target.y); } }
@@ -136,7 +152,6 @@
     const maxDepth = Math.max(0, parseInt(depthInput?.value || '2', 10));
     const direction = directionSelect?.value || 'both';
     const keep = bfs(selectedId, { maxDepth, direction });
-    // Build subgraph arrays
     const idToNode = new Map(nodes.map((n) => [n.id, n]));
     const nodesSub = Array.from(keep).map((id) => idToNode.get(id)).filter(Boolean);
     const linksSub = links.filter((l) => keep.has(l.source.id) && keep.has(l.target.id));
@@ -145,6 +160,52 @@
     simulation.nodes(nodes); simulation.force('link').links(links); simulation.alpha(0.7).restart();
     createScene();
   });
+
+  // Directional layered tree layout from selectedId
+  function applyTreeLayout() {
+    if (!selectedId) return;
+    // Use current direction for a trie-like expansion (default outbound)
+    const direction = directionSelect?.value || 'out';
+    const dist = new Map();
+    const queue = [selectedId]; dist.set(selectedId, 0);
+    while (queue.length) {
+      const v = queue.shift();
+      const d = dist.get(v) || 0;
+      if (direction !== 'in') for (const n of outAdj.get(v) || []) if (!dist.has(n)) { dist.set(n, d + 1); queue.push(n); }
+      if (direction !== 'out') for (const n of inAdj.get(v) || []) if (!dist.has(n)) { dist.set(n, d + 1); queue.push(n); }
+    }
+    const layers = new Map();
+    for (const [id, d] of dist) { if (!layers.has(d)) layers.set(d, []); layers.get(d).push(id); }
+
+    const layerGapY = 80, nodeGapX = 80;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const cx = width / 2, cy = height / 2;
+    const maxDepthLocal = Math.max(...layers.keys());
+    for (const [d, ids] of layers) {
+      const totalWidth = Math.max(0, (ids.length - 1) * nodeGapX);
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i];
+        const x = cx - totalWidth / 2 + i * nodeGapX;
+        const y = cy + (d - maxDepthLocal / 2) * layerGapY;
+        const n = nodes.find((nn) => nn.id === id);
+        if (!n) continue; n.x = x; n.y = y;
+        minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+      }
+    }
+
+    // Stop simulation and render static tree
+    simulation.stop();
+    for (const n of nodes) { const s = nodeSprite.get(n.id); if (s) s.position.set(n.x, n.y); const t = nodeLabel.get(n.id); if (t) t.position.set(n.x + 8, n.y); }
+    edgesLayer.clear(); edgesLayer.lineStyle(0.6, 0x999999, 0.35); for (const l of links) { edgesLayer.moveTo(l.source.x, l.source.y); edgesLayer.lineTo(l.target.x, l.target.y); }
+
+    // Center viewport on laid-out subgraph
+    const centerX = (minX + maxX) / 2; const centerY = (minY + maxY) / 2;
+    viewport.moveCenter(centerX, centerY);
+  }
+
+  layoutTreeBtn?.addEventListener('click', applyTreeLayout);
+  layoutForceBtn?.addEventListener('click', () => { simulation.alpha(0.8).restart(); });
 
   resetBtn?.addEventListener('click', () => { selectedId = null; resetFocus(); });
 
