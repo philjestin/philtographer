@@ -50,8 +50,15 @@ func ParseTSFile(path string, content []byte) (FileInfo, error) {
 			}
 			clause := findChild(n, "import_clause")
 			if clause != nil {
+				// default import: import Foo from "..."
 				if id := findChild(clause, "identifier"); id != nil {
 					info.ImportMap[nodeText(content, id)] = mod
+				}
+				// namespace import: import * as NS from "..."
+				if ns := findChild(clause, "namespace_import"); ns != nil {
+					if nid := findChild(ns, "identifier"); nid != nil {
+						info.ImportMap[nodeText(content, nid)] = mod
+					}
 				}
 				if nb := findChild(clause, "named_imports"); nb != nil {
 					for i := 0; i < int(nb.NamedChildCount()); i++ {
@@ -186,7 +193,7 @@ func ResolveImportedComponent(currentFile string, importMap map[string]string, i
 	}
 	if strings.HasPrefix(mod, "./") || strings.HasPrefix(mod, "../") || strings.HasPrefix(mod, "/") {
 		cand := filepath.Clean(filepath.Join(filepath.Dir(currentFile), mod))
-		exts := []string{".tsx", ".ts"}
+		exts := []string{".tsx", ".ts", ".jsx", ".js"}
 		if filepath.Ext(cand) == "" {
 			for _, e := range exts {
 				if p := cand + e; fileExists(p) {

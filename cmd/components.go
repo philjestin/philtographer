@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -29,10 +30,6 @@ var componentsCmd = &cobra.Command{
 		out := viper.GetString("out")
 		if out == "" && cfg.Out != "" {
 			out = cfg.Out
-		}
-
-		if len(cfg.Entries) == 0 {
-			return fmt.Errorf("no entries configured; components scan requires entries")
 		}
 
 		// Build providers from config (reuse logic from entries command)
@@ -65,8 +62,27 @@ var componentsCmd = &cobra.Command{
 				}
 			}
 		}
+
+		// If no providers configured or they yielded nothing, fallback to cfg.Root as an entry.
+		if len(entryPaths) == 0 && cfg.Root != "" {
+			rootEntry := cfg.Root
+			if fi, err := os.Stat(rootEntry); err == nil && fi.IsDir() {
+				for _, name := range []string{"index.tsx", "index.ts", "index.jsx", "index.js"} {
+					cand := filepath.Join(rootEntry, name)
+					if info, err := os.Stat(cand); err == nil && !info.IsDir() {
+						rootEntry = cand
+						break
+					}
+				}
+			}
+			if !seen[rootEntry] {
+				seen[rootEntry] = true
+				entryPaths = append(entryPaths, rootEntry)
+			}
+		}
+
 		if len(entryPaths) == 0 {
-			return fmt.Errorf("no entry paths resolved from config entries")
+			return fmt.Errorf("no entry paths resolved; provide entries in config or use --root pointing to an entry or directory with index.*")
 		}
 
 		// progress printer (rate-limited, single line)

@@ -75,7 +75,7 @@ func BuildComponentGraphFromEntriesProgress(
 				}
 				data, err := os.ReadFile(j.path)
 				if err == nil {
-					if fi, perr := ParseTSFile(j.path, data); perr == nil {
+					if fi, perr := ParseTSX(j.path, data); perr == nil {
 						gmu.Lock()
 						g.Touch(j.path)
 						gmu.Unlock()

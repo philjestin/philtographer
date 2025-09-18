@@ -78,11 +78,23 @@ func ParseImports(content string) []string {
 	add(reDynamic.FindAllStringSubmatch(content, -1))
 	add(reExportFrom.FindAllStringSubmatch(content, -1))
 
-	// Normalize, ignore style/assets and node builtins
+	// Normalize, ignore style/assets and globs
 	out := make([]string, 0, len(seen))
 	for module := range seen {
 		l := strings.ToLower(module)
-		if strings.HasSuffix(l, ".css") || strings.HasSuffix(l, ".scss") || strings.HasSuffix(l, ".less") || strings.HasSuffix(l, ".yml") {
+		// drop common non-code assets and globbed imports from .d.ts
+		if strings.Contains(module, "*") ||
+			strings.HasSuffix(l, ".css") ||
+			strings.HasSuffix(l, ".scss") ||
+			strings.HasSuffix(l, ".less") ||
+			strings.HasSuffix(l, ".yml") ||
+			strings.HasSuffix(l, ".jpg") ||
+			strings.HasSuffix(l, ".jpeg") ||
+			strings.HasSuffix(l, ".png") ||
+			strings.HasSuffix(l, ".gif") ||
+			strings.HasSuffix(l, ".svg") ||
+			strings.HasSuffix(l, ".mp3") ||
+			strings.HasSuffix(l, ".mp4") {
 			continue
 		}
 		out = append(out, module)
@@ -114,7 +126,7 @@ func Resolve(fromFile, spec string) (string, error) {
 	}
 
 	// Try common extensions
-	extensions := []string{".ts", ".tsx"}
+	extensions := []string{".ts", ".tsx", ".js", ".jsx"}
 	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 		// try index/barrel files
 		for _, extension := range extensions {
@@ -226,15 +238,10 @@ func BuildGraph(ctx context.Context, root string) (*graph.Graph, error) {
 		case r, ok := <-resultChannel:
 			if !ok {
 				// finished all results
-				if len(unresolved) > 0 {
-					var b strings.Builder
-					b.WriteString("some imports could not be resolved:\n")
-					for _, u := range unresolved {
-						fmt.Fprintf(&b, "- %s: import %q: %v\n", u.File, u.Spec, u.Err)
-					}
-					// choose: fail hard, or return g, nil (partial graph)
-					return g, fmt.Errorf(b.String())
-				}
+				// If there are unresolved relative imports, keep the partial graph
+				// and do not fail the scan. This supports code understanding with
+				// ambient/type-only declarations that reference non-existent files.
+				// Optionally, these could be surfaced as warnings by the caller.
 				return g, nil
 			}
 

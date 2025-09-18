@@ -11,26 +11,36 @@
   </head>
   <body>
     <header>
-      <h1>Philtographer</h1>
-      <input id="search" type="search" placeholder="Search node by file path" />
-      <label>Depth <input id="depth" type="number" min="0" max="10" step="1" value="2" style="width:60px"></label>
-      <label>
-        Direction
-        <select id="direction">
-          <option value="both">both</option>
-          <option value="out">outbound</option>
-          <option value="in">inbound</option>
-        </select>
-      </label>
-      <label>Min-degree <input id="minDegree" type="number" min="0" max="50" step="1" value="0" style="width:60px"></label>
-      <label><input id="toggleLabels" type="checkbox" checked> labels</label>
-      <label><input id="hideNonFocused" type="checkbox"> hide non-focused</label>
-      <button id="isolate">Isolate</button>
-      <button id="subgraph">Subgraph</button>
-      <button id="layoutTree">Tree</button>
-      <button id="layoutForce">Force</button>
-      <button id="reset">Reset</button>
-      <span id="status"></span>
+      <div class="row row-top">
+        <h1>Philtographer</h1>
+        <div class="search-wrap">
+          <input id="search" type="search" placeholder="Search node by file path" autocomplete="off" />
+          <ul id="suggestions" class="suggestions" role="listbox" aria-label="Node suggestions"></ul>
+        </div>
+        <span class="spacer"></span>
+        <span id="status"></span>
+      </div>
+      <div class="row row-controls">
+        <label>Depth <input id="depth" type="number" min="0" max="10" step="1" value="2" style="width:60px"></label>
+        <label>
+          Direction
+          <select id="direction">
+            <option value="both">both</option>
+            <option value="out">outbound</option>
+            <option value="in">inbound</option>
+          </select>
+        </label>
+        <label>Min-degree <input id="minDegree" type="number" min="0" max="50" step="1" value="0" style="width:60px"></label>
+        <label><input id="toggleLabels" type="checkbox" checked> labels</label>
+        <label><input id="hideNonFocused" type="checkbox"> hide non-focused</label>
+        <button id="isolate">Isolate</button>
+        <button id="subgraph">Subgraph</button>
+        <button id="layoutTree">Tree</button>
+        <button id="layoutForce">Force</button>
+        <button id="fitView">Fit</button>
+        <button id="reset">Reset</button>
+        <label class="right"><input id="themeToggle" type="checkbox"> dark</label>
+      </div>
     </header>
     <main>
       <div id="stage"></div>

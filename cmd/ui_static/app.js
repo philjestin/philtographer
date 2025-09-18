@@ -3,6 +3,7 @@
   const stageEl = document.getElementById('stage');
   const headerEl = document.querySelector('header');
   const searchInput = document.getElementById('search');
+  const suggestionsEl = document.getElementById('suggestions');
   const depthInput = document.getElementById('depth');
   const directionSelect = document.getElementById('direction');
   const isolateBtn = document.getElementById('isolate');
@@ -13,6 +14,8 @@
   const hideNonFocused = document.getElementById('hideNonFocused');
   const layoutTreeBtn = document.getElementById('layoutTree');
   const layoutForceBtn = document.getElementById('layoutForce');
+  const fitViewBtn = document.getElementById('fitView');
+  const themeToggle = document.getElementById('themeToggle');
   const tooltip = document.getElementById('tooltip');
 
   const hasPixi = typeof PIXI !== 'undefined';
@@ -81,7 +84,7 @@
 
   if (!hasPixi || !Viewport) { status.textContent = 'WebGL libraries failed to load'; return; }
 
-  const app = new PIXI.Application({ width, height, antialias: false, background: 0xfafafa, resolution: window.devicePixelRatio || 1, autoDensity: true });
+  const app = new PIXI.Application({ width, height, antialias: false, background: 0x0b0e14, resolution: window.devicePixelRatio || 1, autoDensity: true });
   stageEl.innerHTML = ''; stageEl.appendChild(app.view);
 
   const viewport = new Viewport({ screenWidth: width, screenHeight: height, worldWidth: width, worldHeight: height, events: app.renderer.events });
@@ -109,7 +112,7 @@
       g.on('pointerdown', () => { selectedId = n.id; focusOn(n.id); highlightSelected(); });
       g.on('pointerover', (ev) => { showTooltip(n.id, ev.clientX, ev.clientY); }); g.on('pointermove', (ev) => { showTooltip(n.id, ev.clientX, ev.clientY); }); g.on('pointerout', hideTooltip);
       nodesLayer.addChild(g); nodeSprite.set(n.id, g);
-      const label = new PIXI.Text(labelFor(n.id), { fontSize: 10, fill: 0x111111, resolution: 2 }); label.anchor.set(0, 0.5); labelsLayer.addChild(label); nodeLabel.set(n.id, label);
+      const label = new PIXI.Text(labelFor(n.id), { fontSize: 10, fill: 0xe6e6e6, resolution: 2 }); label.anchor.set(0, 0.5); labelsLayer.addChild(label); nodeLabel.set(n.id, label);
     }
     toggleLabelVisibility(); highlightSelected();
   }
@@ -120,7 +123,14 @@
   toggleLabels?.addEventListener('change', toggleLabelVisibility); toggleLabelVisibility();
   function labelFor(id) { const idx = id.lastIndexOf('/'); return idx >= 0 ? id.slice(idx + 1) : id; }
 
-  function drawEdges(alphaAll) { edgesLayer.clear(); edgesLayer.lineStyle(0.6, 0x999999, alphaAll ?? 0.25); for (const l of links) { edgesLayer.moveTo(l.source.x, l.source.y); edgesLayer.lineTo(l.target.x, l.target.y); } }
+  let lastEdgeDraw = 0;
+  function drawEdges(alphaAll) {
+    const now = performance.now();
+    if (now - lastEdgeDraw < 16) return; // ~60fps throttle
+    lastEdgeDraw = now;
+    edgesLayer.clear(); edgesLayer.lineStyle(0.6, 0x5b6472, alphaAll ?? 0.28);
+    for (const l of links) { edgesLayer.moveTo(l.source.x, l.source.y); edgesLayer.lineTo(l.target.x, l.target.y); }
+  }
   simulation.on('tick', () => { for (const n of nodes) { const s = nodeSprite.get(n.id); if (s) s.position.set(n.x, n.y); const t = nodeLabel.get(n.id); if (t) t.position.set(n.x + 8, n.y); } drawEdges(); });
 
   function bfsDirectional(startId, dir) {
@@ -139,13 +149,42 @@
 
   function bfs(startId, options) { const { maxDepth, direction } = options; const visited = new Set([startId]); let frontier = new Set([startId]); for (let depth = 0; depth < maxDepth; depth++) { const next = new Set(); for (const id of frontier) { if (direction !== 'in') for (const n of outAdj.get(id) || []) if (!visited.has(n)) { visited.add(n); next.add(n); } if (direction !== 'out') for (const n of inAdj.get(id) || []) if (!visited.has(n)) { visited.add(n); next.add(n); } } if (next.size === 0) break; frontier = next; } return visited; }
 
-  function applyFocus(keep) { const hide = !!hideNonFocused?.checked; for (const n of nodes) { const visible = keep.has(n.id) || !hide; const alpha = keep.has(n.id) ? 1 : (hide ? 0 : 0.2); const s = nodeSprite.get(n.id); if (s) { s.alpha = alpha; s.renderable = visible; } const t = nodeLabel.get(n.id); if (t) { t.alpha = alpha; t.renderable = visible && labelsLayer.visible; } } edgesLayer.clear(); for (const l of links) { const show = keep.has(l.source.id) && keep.has(l.target.id); const alpha = show ? (hide ? 0.6 : 0.35) : (hide ? 0 : 0.05); if (alpha <= 0) continue; edgesLayer.lineStyle(0.6, 0x999999, alpha); edgesLayer.moveTo(l.source.x, l.source.y); edgesLayer.lineTo(l.target.x, l.target.y); } }
+  function applyFocus(keep) { const hide = !!hideNonFocused?.checked; for (const n of nodes) { const visible = keep.has(n.id) || !hide; const alpha = keep.has(n.id) ? 1 : (hide ? 0 : 0.2); const s = nodeSprite.get(n.id); if (s) { s.alpha = alpha; s.renderable = visible; } const t = nodeLabel.get(n.id); if (t) { t.alpha = alpha; t.renderable = visible && labelsLayer.visible; } } edgesLayer.clear(); for (const l of links) { const show = keep.has(l.source.id) && keep.has(l.target.id); const alpha = show ? (hide ? 0.6 : 0.35) : (hide ? 0 : 0.05); if (alpha <= 0) continue; edgesLayer.lineStyle(0.6, 0x5b6472, alpha); edgesLayer.moveTo(l.source.x, l.source.y); edgesLayer.lineTo(l.target.x, l.target.y); } }
 
   function focusOn(startId) { const maxDepth = Math.max(0, parseInt(depthInput?.value || '2', 10)); const direction = directionSelect?.value || 'both'; applyFocus(bfs(startId, { maxDepth, direction })); }
 
   function resetFocus() { nodes = full.nodes; links = full.links; status.textContent = `Nodes: ${nodes.length}, Edges: ${links.length}`; rebuildAdjacency(); simulation.nodes(nodes); simulation.force('link').links(links); simulation.alpha(0.5).restart(); createScene(); }
 
-  isolateBtn?.addEventListener('click', () => { const q = (searchInput?.value || '').trim(); if (!q) return; let match = nodes.find((n) => n.id === q) || nodes.find((n) => n.id.includes(q)); if (match) { selectedId = match.id; highlightSelected(); focusOn(match.id); } });
+  isolateBtn?.addEventListener('click', () => { const q = (searchInput?.value || '').trim(); if (!q) return; let match = nodes.find((n) => n.id === q) || nodes.find((n) => n.id.includes(q)); if (match) { selectedId = match.id; highlightSelected(); focusOn(match.id); } suggestionsEl?.classList.remove('show'); });
+
+  // Autosuggest
+  let activeIndex = -1;
+  function labelFor(id) { const idx = id.lastIndexOf('/'); return idx >= 0 ? id.slice(idx + 1) : id; }
+  function rankCandidates(query) {
+    const q = query.toLowerCase(); if (!q) return [];
+    const scored = nodes.map((n) => { const id = n.id; const name = labelFor(id).toLowerCase(); const hay = id.toLowerCase(); let score = -1; if (name.startsWith(q)) score = 100 - name.length; else if (hay.includes(q)) score = 50 - hay.length; return { id, score }; }).filter(x => x.score >= 0);
+    scored.sort((a,b)=> b.score - a.score);
+    return scored.slice(0, 20).map(s => s.id);
+  }
+  function renderSuggestions(ids) {
+    if (!suggestionsEl) return;
+    suggestionsEl.innerHTML = '';
+    if (!ids.length) { suggestionsEl.classList.remove('show'); activeIndex = -1; return; }
+    for (let i=0;i<ids.length;i++) { const li = document.createElement('li'); li.textContent = ids[i]; li.setAttribute('role','option'); li.addEventListener('mousedown', (e) => { e.preventDefault(); chooseSuggestion(ids[i]); }); suggestionsEl.appendChild(li); }
+    suggestionsEl.classList.add('show'); activeIndex = -1;
+  }
+  function chooseSuggestion(id) { searchInput.value = id; suggestionsEl?.classList.remove('show'); const match = nodes.find(n => n.id === id); if (match) { selectedId = id; highlightSelected(); focusOn(id); } }
+  searchInput?.addEventListener('input', () => { const q = (searchInput.value || '').trim(); renderSuggestions(rankCandidates(q)); });
+  searchInput?.addEventListener('keydown', (e) => {
+    if (!suggestionsEl?.classList.contains('show')) return;
+    const items = Array.from(suggestionsEl.querySelectorAll('li'));
+    if (!items.length) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); activeIndex = Math.min(items.length - 1, activeIndex + 1); updateActive(items); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); activeIndex = Math.max(0, activeIndex - 1); updateActive(items); }
+    else if (e.key === 'Enter') { e.preventDefault(); if (activeIndex >= 0) chooseSuggestion(items[activeIndex].textContent); else if (items[0]) chooseSuggestion(items[0].textContent); }
+    else if (e.key === 'Escape') { suggestionsEl.classList.remove('show'); }
+  });
+  function updateActive(items) { items.forEach((el, i) => { if (i === activeIndex) el.classList.add('active'); else el.classList.remove('active'); }); const el = items[activeIndex]; if (el) { const rect = el.getBoundingClientRect(); const parent = suggestionsEl.getBoundingClientRect(); if (rect.bottom > parent.bottom) el.scrollIntoView(false); if (rect.top < parent.top) el.scrollIntoView(); } }
 
   subgraphBtn?.addEventListener('click', () => {
     if (!selectedId) return;
@@ -206,9 +245,19 @@
 
   layoutTreeBtn?.addEventListener('click', applyTreeLayout);
   layoutForceBtn?.addEventListener('click', () => { simulation.alpha(0.8).restart(); });
+  fitViewBtn?.addEventListener('click', () => { viewport.fit(true); });
 
   resetBtn?.addEventListener('click', () => { selectedId = null; resetFocus(); });
 
   function onResize() { const size = getSize(); width = size.width; height = size.height; app.renderer.resize(width, height); viewport.resize(width, height, width, height); simulation.force('center', d3.forceCenter(width / 2, height / 2)); simulation.alpha(0.15).restart(); }
+
+  // theme toggle (dark default)
+  function applyTheme(dark) {
+    const bg = dark ? 0x0b0e14 : 0xffffff;
+    app.renderer.background.color = bg;
+    document.body.style.background = dark ? '#0b0e14' : '#ffffff';
+  }
+  themeToggle?.addEventListener('change', () => { applyTheme(!!themeToggle.checked); });
+  applyTheme(true);
   window.addEventListener('resize', onResize);
 })();
