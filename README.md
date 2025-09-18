@@ -109,22 +109,16 @@ Flags:
 Build a React component-to-component usage graph by walking from discovered entries and following TSX imports that are actually used in JSX.
 
 ```bash
+# From entries in config (rootsTs/explicit)
 ./bin/philtographer components --config ./philtographer.config.json --out component-graph.json
-```
 
-- Uses the same entry providers as `entries` (`rootsTs`, `explicit`).
-- Requires `entries` configured in `philtographer.config.*`.
-- Progress is printed to stderr; output is JSON written to `--out` or stdout.
-
-
-You can run without configured entries by pointing --root at an entry file or a directory with index.*:
-
-```bash
+# Or point at a single root/dir (uses index.* if a directory)
 ./bin/philtographer components --root ./frontend/app --out component-graph.json
 ```
 
-When entries are configured, they are discovered via rootsTs/explicit providers (same as entries).
-Progress is printed to stderr; JSON is written to --out or stdout.
+- Uses the same entry providers as `entries` (`rootsTs`, `explicit`).
+- If no entries are configured, `--root` may point to an entry file or a directory with `index.tsx|ts|jsx|js`.
+- Progress is printed to stderr; output is JSON written to `--out` or stdout.
 
 ---
 
@@ -141,24 +135,59 @@ Print nodes that have no inbound or outbound edges in a previously generated gra
 
 ---
 
-### `ui`
+### `watch`
 
-Serve a small local UI to visualize a `graph.json` as a force‑directed graph in the browser.
-
-UI features:
-- Autosuggest search: type to see ranked node matches; ⬆/⬇ to navigate; Enter to focus.
-- Two-row header: row 1 has title + large search; row 2 has filters/actions.
-- Actions: Isolate, Subgraph, Tree layout, Force, Fit, Reset, labels toggle, hide non‑focused.
-- Dark theme toggle (default on), WebGL canvas with pan/zoom (drag, wheel, pinch).
+Watch the workspace for changes, rebuild the graph, compute the impacted set, and stream updates to the UI.
 
 ```bash
-./bin/philtographer ui --graph ./graph.json --addr :8080
+# Full-module graph watch
+./bin/philtographer watch \
+  --mode scan \
+  --root ./your/workspace \
+  --graph ./tmp/graph.json \
+  --events ./tmp/events.json
+
+# Component graph watch (uses entries or --root/index.* fallback)
+./bin/philtographer watch \
+  --mode components \
+  --config ./philtographer.config.json \
+  --graph ./tmp/component-graph.json \
+  --events ./tmp/component-events.json
+
+# Only write the affected subgraph after a change
+./bin/philtographer watch --mode scan --root ./your/workspace \
+  --graph ./tmp/graph.json --events ./tmp/events.json --affected-only
 ```
 
-- `--graph`: path to the JSON graph file (required)
-- `--addr`: address to listen on (default `:8080`)
+Flags:
+- `--mode`: `scan` (full dependency graph) or `components` (TSX component graph)
+- `--graph`: output graph JSON path
+- `--events`: output events JSON path (changed + impacted)
+- `--affected-only`: write a subgraph after each change (smaller + faster)
 
-Then open `http://localhost:8080`.
+When `--affected-only` is used, `graph.json` includes both the union subgraph and per-changed roots:
+
+```json
+{
+  "nodes": ["…union nodes…"],
+  "edges": [{"From":"…","To":"…"}],
+  "graphs": [
+    {"root":"/abs/path/to/changed.tsx","nodes":[…],"edges":[…]},
+    {"root":"/abs/path/to/another-change.tsx","nodes":[…],"edges":[…]}
+  ]
+}
+```
+
+### `ui`
+
+Serve a local UI to visualize a `graph.json` (union or per-changed subgraphs) and stream updates live.
+
+```bash
+./bin/philtographer ui --graph ./tmp/graph.json --events ./tmp/events.json --addr :8080
+```
+
+- Live updates: the UI opens a WebSocket to the server and hot‑reloads when `graph.json` or `events.json` changes.
+- Open `http://localhost:8080`.
 
 ---
 
@@ -233,14 +262,19 @@ go test ./...
 
 ## UI (Force-Directed Graph Viewer)
 
-Serve a lightweight UI to visualize a previously generated `graph.json`:
+Serve a lightweight UI to visualize a `graph.json` with live updates (see `watch` above for recommended flow).
 
-```bash
-philtographer ui --graph ./graph.json --addr :8080
-```
+Key features:
+- Large autosuggest search with keyboard navigation.
+- Two‑row header; graph controls on second row.
+- Right sidebar with:
+  - Views: Union + pills for each changed root (when `graphs` is present)
+  - Changed: clickable chips focus nodes
+  - Impacted: clickable chips focus nodes
+- Resizable sidebar (drag the vertical handle); canvas resizes in lock‑step.
+- Pan/zoom (drag, wheel, pinch), Force/Tree layouts, label toggle, depth/direction focus.
 
-Then open `http://localhost:8080`.
-
-- `--graph`: path to the JSON graph file (required)
-- `--addr`: address to listen on (default `:8080`)
+Data refresh:
+- On each change, `events.json` contains `{ ts, changed[], impacted[] }` and the UI updates the sidebar and focuses the set.
+- When `graphs` exists in `graph.json`, use the “Views” pills to switch between Union and per‑changed subgraphs.
 
