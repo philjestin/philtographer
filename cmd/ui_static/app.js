@@ -291,32 +291,28 @@
 
   // Live updates: poll events.json periodically (simpler than websockets for now)
   let lastTs = 0;
-  async function pollEvents() {
+  // Switch to SSE: listen for /sse updates and then fetch events+graph
+  function connectWS() {
     try {
-      const res = await fetch('/events.json', { cache: 'no-cache' });
-      if (!res.ok) return;
-      const evt = await res.json();
-      if (!evt || typeof evt.ts !== 'number') return;
-      if (evt.ts <= lastTs) return;
-      lastTs = evt.ts;
-      // reload graph.json on update, then focus impacted
-      const gres = await fetch('/graph.json', { cache: 'no-cache' });
-      if (gres.ok) {
-        graph = await gres.json();
-        full = computeFiltered(); nodes = full.nodes; links = full.links; rebuildAdjacency(); simulation.nodes(nodes); simulation.force('link').links(links); simulation.alpha(0.4).restart(); createScene(); status.textContent = `Nodes: ${nodes.length}, Edges: ${links.length}`;
-        // show changed files and focus impacted
-        renderDiff(evt.changed, evt.impacted);
-        // If no impacted provided, at least try to select the first changed file
-        const list = Array.isArray(evt.impacted) && evt.impacted.length ? evt.impacted : (Array.isArray(evt.changed) ? evt.changed : []);
-        if (list.length) { const set = new Set(list.filter(Boolean)); applyFocus(set); selectedId = list[0]; highlightSelected(); }
-      }
-    } catch (e) {
-      // ignore transient errors
-    } finally {
-      setTimeout(pollEvents, 1500);
+      const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
+      const ws = new WebSocket(`${proto}://${location.host}/ws`);
+      ws.onmessage = async () => {
+        try {
+          const r = await fetch('/events.json', { cache: 'no-cache' });
+          if (!r.ok) return; const evt = await r.json(); if (!evt || typeof evt.ts !== 'number' || evt.ts <= lastTs) return; lastTs = evt.ts;
+          const gres = await fetch('/graph.json', { cache: 'no-cache' }); if (!gres.ok) return; graph = await gres.json();
+          full = computeFiltered(); nodes = full.nodes; links = full.links; rebuildAdjacency(); simulation.nodes(nodes); simulation.force('link').links(links); simulation.alpha(0.4).restart(); createScene(); status.textContent = `Nodes: ${nodes.length}, Edges: ${links.length}`;
+          renderDiff(evt.changed, evt.impacted);
+          const list = Array.isArray(evt.impacted) && evt.impacted.length ? evt.impacted : (Array.isArray(evt.changed) ? evt.changed : []);
+          if (list.length) { const set = new Set(list.filter(Boolean)); applyFocus(set); selectedId = list[0]; highlightSelected(); }
+        } catch {}
+      };
+      ws.onclose = () => { setTimeout(connectWS, 1500); };
+    } catch {
+      // fallback: if SSE fails, do nothing (or could re-enable polling)
     }
   }
-  pollEvents();
+  connectWS();
 
   function renderDiff(changed, impacted) {
     const c = Array.isArray(changed) ? changed : [];
