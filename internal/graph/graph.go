@@ -162,3 +162,13 @@ func (g *Graph) Touch(n string) {
 		g.reverse[n] = make(map[string]struct{})
 	}
 }
+
+// ForEachEdge calls fn for every directed edge (from -> to) in the graph.
+// It does not allocate and does not expose internal maps to callers.
+func (g *Graph) ForEachEdge(fn func(from, to string)) {
+	for from, tos := range g.edges {
+		for to := range tos {
+			fn(from, to)
+		}
+	}
+}

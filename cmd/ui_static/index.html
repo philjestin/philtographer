@@ -41,9 +41,19 @@
         <button id="reset">Reset</button>
         <label class="right"><input id="themeToggle" type="checkbox"> dark</label>
       </div>
+      <div class="row row-diff" id="diffPanel" aria-live="polite"></div>
     </header>
     <main>
       <div id="stage"></div>
+      <div id="resizer" aria-hidden="true" title="Drag to resize"></div>
+      <aside id="sidebar">
+        <h3>Views</h3>
+        <div id="viewsList"></div>
+        <h3>Changed</h3>
+        <div id="changedList"></div>
+        <h3>Impacted</h3>
+        <div id="impactedList"></div>
+      </aside>
     </main>
     <div id="tooltip"></div>
     <script src="/app.js"></script>

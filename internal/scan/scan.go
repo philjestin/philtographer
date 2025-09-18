@@ -24,14 +24,17 @@ var (
 )
 
 func isSource(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-
-	switch ext {
-	case ".ts", ".tsx":
-		return true
-	default:
+	// Exclude test/spec files and common test directories
+	lower := strings.ToLower(path)
+	base := strings.ToLower(filepath.Base(path))
+	if strings.HasSuffix(base, ".spec.ts") || strings.HasSuffix(base, ".spec.tsx") ||
+		strings.HasSuffix(base, ".test.ts") || strings.HasSuffix(base, ".test.tsx") ||
+		strings.HasSuffix(base, ".enzyme.test.tsx") ||
+		strings.Contains(lower, "/spec/") || strings.Contains(lower, "/specs/") || strings.Contains(lower, "/__tests__/") {
 		return false
 	}
+	ext := strings.ToLower(filepath.Ext(path))
+	return ext == ".ts" || ext == ".tsx"
 }
 
 type Result struct {
@@ -194,7 +197,7 @@ func BuildGraph(ctx context.Context, root string) (*graph.Graph, error) {
 				}
 				return nil
 			}
-			if isSource(path) {
+            if isSource(path) {
 				fileChannel <- path
 			}
 			return nil
@@ -215,7 +218,11 @@ func BuildGraph(ctx context.Context, root string) (*graph.Graph, error) {
 					resultChannel <- Result{File: path, Err: err}
 					continue
 				}
-				imports := ParseImports(string(data))
+				// Prefer AST-based import extraction; fallback to regex if needed
+				imports := parseImportsAST(path, data)
+				if len(imports) == 0 {
+					imports = ParseImports(string(data))
+				}
 				resultChannel <- Result{File: path, Imports: imports, Err: nil}
 			}
 		}()
