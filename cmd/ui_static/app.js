@@ -19,6 +19,7 @@
   const tooltip = document.getElementById('tooltip');
   const changedList = document.getElementById('changedList');
   const impactedList = document.getElementById('impactedList');
+  const viewsList = document.getElementById('viewsList');
   const resizer = document.getElementById('resizer');
 
   const hasPixi = typeof PIXI !== 'undefined';
@@ -50,18 +51,17 @@
   const isYaml = (id) => /\.ya?ml$/i.test(id);
   const isTest = (id) => /(^|\/)__(tests|spec)s?__(\/|$)/i.test(id) || /\.(test|spec)\.(tsx?|jsx?)$/i.test(id) || /enzyme\.test\.(tsx?|jsx?)$/i.test(id);
 
-  const degree = new Map();
-  const nodesAll = (graph.nodes || []);
-  for (const id of nodesAll) degree.set(id, 0);
-  for (const e of (graph.edges || [])) { degree.set(e.From, (degree.get(e.From) || 0) + 1); degree.set(e.To, (degree.get(e.To) || 0) + 1); }
-
   function computeFiltered() {
+    const nodesAll = (graph.nodes || []);
+    const degree = new Map();
+    for (const id of nodesAll) degree.set(id, 0);
+    for (const e of (graph.edges || [])) { degree.set(e.From, (degree.get(e.From) || 0) + 1); degree.set(e.To, (degree.get(e.To) || 0) + 1); }
     const minDeg = Math.max(0, parseInt(minDegreeInput?.value || '0', 10));
     const allowed = new Set(nodesAll.filter((id) => !isYaml(id) && !isTest(id) && (degree.get(id) || 0) >= minDeg));
     const nodes = Array.from(allowed).map((id) => ({ id }));
     const idToNode = new Map(nodes.map((n) => [n.id, n]));
     const links = [];
-    for (const e of graph.edges || []) { const s = idToNode.get(e.From); const t = idToNode.get(e.To); if (s && t) links.push({ source: s, target: t }); }
+    for (const e of (graph.edges || [])) { const s = idToNode.get(e.From); const t = idToNode.get(e.To); if (s && t) links.push({ source: s, target: t }); }
     return { nodes, links };
   }
 
@@ -121,6 +121,18 @@
     toggleLabelVisibility(); highlightSelected();
   }
   createScene();
+
+  // Prime the sidebar once on load using the latest events (if any)
+  try {
+    const r0 = await fetch('/events.json', { cache: 'no-cache' });
+    if (r0.ok) {
+      const e0 = await r0.json();
+      if (e0 && typeof e0.ts === 'number') {
+        lastTs = e0.ts;
+        renderDiff(e0.changed, e0.impacted);
+      }
+    }
+  } catch {}
 
   function highlightSelected() { for (const [id, sprite] of nodeSprite) { sprite.lineStyle?.(0); if (id === selectedId) { sprite.lineStyle?.(1.5, 0x000000, 1); } } }
   function toggleLabelVisibility() { const on = !!toggleLabels?.checked; labelsLayer.visible = on; }
@@ -292,24 +304,38 @@
   // Live updates: poll events.json periodically (simpler than websockets for now)
   let lastTs = 0;
   // Switch to SSE: listen for /sse updates and then fetch events+graph
+  async function refreshFromServer() {
+    try {
+      const r = await fetch('/events.json', { cache: 'no-cache' });
+      if (!r.ok) return; const evt = await r.json(); if (!evt || typeof evt.ts !== 'number' || evt.ts <= lastTs) return; lastTs = evt.ts;
+      const gres = await fetch('/graph.json', { cache: 'no-cache' }); if (!gres.ok) return; graph = await gres.json();
+      const fullNow = computeFiltered(); nodes = fullNow.nodes; links = fullNow.links; rebuildAdjacency(); simulation.nodes(nodes); simulation.force('link').links(links); simulation.alpha(0.4).restart(); createScene(); status.textContent = `Nodes: ${nodes.length}, Edges: ${links.length}`;
+      renderDiff(evt.changed, evt.impacted);
+      const list = Array.isArray(evt.impacted) && evt.impacted.length ? evt.impacted : (Array.isArray(evt.changed) ? evt.changed : []);
+      if (list.length) { const set = new Set(list.filter(Boolean)); applyFocus(set); selectedId = list[0]; highlightSelected(); }
+    } catch (e) { console.error('update error', e); }
+  }
+
   function connectWS() {
     try {
       const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
       const ws = new WebSocket(`${proto}://${location.host}/ws`);
-      ws.onmessage = async () => {
-        try {
-          const r = await fetch('/events.json', { cache: 'no-cache' });
-          if (!r.ok) return; const evt = await r.json(); if (!evt || typeof evt.ts !== 'number' || evt.ts <= lastTs) return; lastTs = evt.ts;
-          const gres = await fetch('/graph.json', { cache: 'no-cache' }); if (!gres.ok) return; graph = await gres.json();
-          full = computeFiltered(); nodes = full.nodes; links = full.links; rebuildAdjacency(); simulation.nodes(nodes); simulation.force('link').links(links); simulation.alpha(0.4).restart(); createScene(); status.textContent = `Nodes: ${nodes.length}, Edges: ${links.length}`;
-          renderDiff(evt.changed, evt.impacted);
-          const list = Array.isArray(evt.impacted) && evt.impacted.length ? evt.impacted : (Array.isArray(evt.changed) ? evt.changed : []);
-          if (list.length) { const set = new Set(list.filter(Boolean)); applyFocus(set); selectedId = list[0]; highlightSelected(); }
-        } catch {}
+      // Fallback polling until the first ws message arrives
+      let pollId = setInterval(() => refreshFromServer(), 2000);
+      ws.onopen = () => { console.log('[ws] connected'); };
+      ws.onmessage = () => {
+        if (pollId) { clearInterval(pollId); pollId = null; }
+        refreshFromServer();
       };
-      ws.onclose = () => { setTimeout(connectWS, 1500); };
-    } catch {
-      // fallback: if SSE fails, do nothing (or could re-enable polling)
+      ws.onclose = () => {
+        console.warn('[ws] closed, retrying...');
+        if (!pollId) { pollId = setInterval(() => refreshFromServer(), 2000); }
+        setTimeout(connectWS, 1500);
+      };
+      ws.onerror = () => { try { ws.close(); } catch {} };
+    } catch (e) {
+      console.warn('[ws] connect failed', e);
+      setTimeout(connectWS, 2000);
     }
   }
   connectWS();
@@ -319,11 +345,43 @@
     const i = Array.isArray(impacted) ? impacted : [];
     if (changedList) {
       changedList.innerHTML = '';
+      if (!c.length) { const span=document.createElement('span'); span.textContent='None'; span.style.opacity='0.7'; changedList.appendChild(span); }
       for (const f of c) { const chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = f; chip.title = f; chip.addEventListener('click',()=>{ searchInput.value=f; selectedId=f; highlightSelected(); focusOn(f); }); changedList.appendChild(chip); }
     }
     if (impactedList) {
       impactedList.innerHTML = '';
+      if (!i.length) { const span=document.createElement('span'); span.textContent='None'; span.style.opacity='0.7'; impactedList.appendChild(span); }
       for (const f of i) { const chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = f; chip.title = f; chip.addEventListener('click',()=>{ searchInput.value=f; selectedId=f; highlightSelected(); focusOn(f); }); impactedList.appendChild(chip); }
+    }
+    // Views: if server provided per-root graphs, offer pills to switch
+    if (viewsList) {
+      viewsList.innerHTML = '';
+      const hasGraphs = Array.isArray(graph.graphs) && graph.graphs.length > 0;
+      if (hasGraphs) {
+        const makeChip = (label, on) => { const s=document.createElement('span'); s.className='chip'; s.textContent=label; s.addEventListener('click', on); return s; };
+        const unionChip = makeChip('Union', () => { applyGraphUnion(); }); unionChip.classList.add('active'); viewsList.appendChild(unionChip);
+        for (const gsub of graph.graphs) {
+          const chip = makeChip(gsub.root ? labelFor(gsub.root) : 'graph', () => { applyGraphSub(gsub, chip); });
+          viewsList.appendChild(chip);
+        }
+        function clearActive() { viewsList.querySelectorAll('.chip').forEach(c=>c.classList.remove('active')); }
+        function applyGraphUnion() {
+          clearActive(); unionChip.classList.add('active');
+          // Rebuild from union nodes/edges present in graph
+          const gsave = graph; // use current graph json
+          full = computeFiltered(); nodes = full.nodes; links = full.links; status.textContent = `Nodes: ${nodes.length}, Edges: ${links.length}`; rebuildAdjacency(); simulation.nodes(nodes); simulation.force('link').links(links); simulation.alpha(0.4).restart(); createScene();
+        }
+        function applyGraphSub(gsub, chipEl) {
+          clearActive(); chipEl.classList.add('active');
+          // Build nodes/links from subgraph payload
+          const nodesSet = new Set(gsub.nodes || []);
+          nodes = Array.from(nodesSet).map(id => ({ id }));
+          const idToNode = new Map(nodes.map(n=>[n.id,n]));
+          links = [];
+          for (const e of gsub.edges || []) { const s = idToNode.get(e.From||e.from||e.source); const t = idToNode.get(e.To||e.to||e.target); if (s&&t) links.push({ source:s, target:t }); }
+          status.textContent = `Nodes: ${nodes.length}, Edges: ${links.length}`; rebuildAdjacency(); simulation.nodes(nodes); simulation.force('link').links(links); simulation.alpha(0.5).restart(); createScene();
+        }
+      }
     }
   }
 })();

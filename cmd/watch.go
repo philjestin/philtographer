@@ -22,10 +22,10 @@ import (
 )
 
 var (
-	watchMode   string // "scan" or "components"
-	watchGraph  string // file to write graph json
-	watchEvents string // file to write events json (changed + impacted)
-    watchAffectedOnly bool // if true, write only affected subgraph to --graph after changes
+	watchMode         string // "scan" or "components"
+	watchGraph        string // file to write graph json
+	watchEvents       string // file to write events json (changed + impacted)
+	watchAffectedOnly bool   // if true, write only affected subgraph to --graph after changes
 )
 
 // watchCmd watches the workspace and rebuilds the graph on changes, emitting impacted sets.
@@ -108,8 +108,8 @@ var watchCmd = &cobra.Command{
 			}
 		}
 
-        // initial build (write full graph)
-        if err := doRebuild(cfg.Root, build, watchGraph, watchEvents, nil, false); err != nil {
+		// initial build (write full graph)
+		if err := doRebuild(cfg.Root, build, watchGraph, watchEvents, nil, false); err != nil {
 			return err
 		}
 
@@ -136,8 +136,8 @@ var watchCmd = &cobra.Command{
 				files = append(files, f)
 			}
 			pending = map[string]struct{}{}
-            mu.Unlock()
-            _ = doRebuild(cfg.Root, build, watchGraph, watchEvents, files, watchAffectedOnly)
+			mu.Unlock()
+			_ = doRebuild(cfg.Root, build, watchGraph, watchEvents, files, watchAffectedOnly)
 		}
 
 		for {
@@ -202,18 +202,22 @@ func addRecursive(w *fsnotify.Watcher, root string) error {
 
 // filterSubgraph returns a JSON-serializable view of only nodes in keep and edges among them.
 func filterSubgraph(g *graph.Graph, keep map[string]bool) interface{} {
-    // Collect nodes
-    nodes := []string{}
-    for n := range keep { nodes = append(nodes, n) }
-    type edge struct{ From, To string }
-    edges := []edge{}
-    g.ForEachEdge(func(from, to string) {
-        if keep[from] && keep[to] { edges = append(edges, edge{From: from, To: to}) }
-    })
-    return struct {
-        Nodes []string `json:"nodes"`
-        Edges []edge   `json:"edges"`
-    }{Nodes: nodes, Edges: edges}
+	// Collect nodes
+	nodes := []string{}
+	for n := range keep {
+		nodes = append(nodes, n)
+	}
+	type edge struct{ From, To string }
+	edges := []edge{}
+	g.ForEachEdge(func(from, to string) {
+		if keep[from] && keep[to] {
+			edges = append(edges, edge{From: from, To: to})
+		}
+	})
+	return struct {
+		Nodes []string `json:"nodes"`
+		Edges []edge   `json:"edges"`
+	}{Nodes: nodes, Edges: edges}
 }
 
 func doRebuild(root string, build func(context.Context, []string) (*graph.Graph, []string, error), outGraph, outEvents string, changed []string, affectedOnly bool) error {
@@ -222,18 +226,28 @@ func doRebuild(root string, build func(context.Context, []string) (*graph.Graph,
 		fmt.Fprintln(os.Stderr, "build error:", err)
 	}
 	if g != nil {
-        // If requested, write only the subgraph for changed+impacted (after changes).
-        if affectedOnly && len(changed) > 0 {
-            keep := map[string]bool{}
-            for _, c := range changed { keep[filepath.Clean(c)] = true }
-            for _, i := range impacted { keep[filepath.Clean(i)] = true }
-            sg := filterSubgraph(g, keep)
-            if err := writeJSONFile(outGraph, sg); err != nil { fmt.Fprintln(os.Stderr, "write graph:", err) }
-        } else {
-            if err := writeJSONFile(outGraph, g); err != nil {
-                fmt.Fprintln(os.Stderr, "write graph:", err)
-            }
-        }
+		// If requested, write only the subgraph for changed+impacted (after changes).
+		if affectedOnly && len(changed) > 0 {
+			keep := map[string]bool{}
+			for _, c := range changed {
+				keep[filepath.Clean(c)] = true
+			}
+			for _, i := range impacted {
+				keep[filepath.Clean(i)] = true
+			}
+			sg := filterSubgraph(g, keep)
+			if err := writeJSONFile(outGraph, sg); err != nil {
+				fmt.Fprintln(os.Stderr, "write graph:", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "[watch] wrote affected graph: changed=%d impacted=%d\n", len(changed), len(impacted))
+			}
+		} else {
+			if err := writeJSONFile(outGraph, g); err != nil {
+				fmt.Fprintln(os.Stderr, "write graph:", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "[watch] wrote full graph: nodes=%d\n", len(g.Nodes()))
+			}
+		}
 	}
 	// write events JSON even if graph failed; impacted may be empty
 	evt := struct {
@@ -243,6 +257,8 @@ func doRebuild(root string, build func(context.Context, []string) (*graph.Graph,
 	}{Timestamp: time.Now().UnixMilli(), Changed: changed, Impacted: impacted}
 	if err := writeJSONFile(outEvents, evt); err != nil {
 		fmt.Fprintln(os.Stderr, "write events:", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "[watch] events updated (changed=%d impacted=%d)\n", len(changed), len(impacted))
 	}
 	return nil
 }
@@ -291,5 +307,5 @@ func init() {
 	watchCmd.Flags().StringVar(&watchMode, "mode", "scan", "build mode: scan|components")
 	watchCmd.Flags().StringVar(&watchGraph, "graph", "", "output graph.json path")
 	watchCmd.Flags().StringVar(&watchEvents, "events", "", "output events.json path (default: sibling of --graph)")
-    watchCmd.Flags().BoolVar(&watchAffectedOnly, "affected-only", false, "write only affected subgraph to --graph after each change")
+	watchCmd.Flags().BoolVar(&watchAffectedOnly, "affected-only", false, "write only affected subgraph to --graph after each change")
 }
