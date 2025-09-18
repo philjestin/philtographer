@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -18,8 +20,9 @@ import (
 var uiFS embed.FS
 
 var (
-	uiAddr  string
-	uiGraph string
+	uiAddr   string
+	uiGraph  string
+	uiEvents string
 )
 
 // uiCmd serves a small static UI to visualize a graph.json via D3.
@@ -56,6 +59,9 @@ var uiCmd = &cobra.Command{
 			} else if p == "/graph.json" {
 				serveGraphJSON(w, uiGraph)
 				return
+			} else if p == "/events.json" {
+				serveGraphJSON(w, uiEvents)
+				return
 			} else {
 				// try to serve any other embedded asset under ui_static
 				p = "/ui_static" + p
@@ -83,7 +89,11 @@ var uiCmd = &cobra.Command{
 			}
 		})
 
-		fmt.Fprintf(os.Stderr, "UI listening on http://localhost%s (graph: %s)\n", uiAddr, uiGraph)
+		if uiEvents == "" {
+			// default to sibling of graph
+			uiEvents = strings.TrimSuffix(uiGraph, filepath.Ext(uiGraph)) + "-events.json"
+		}
+		log.Printf("UI listening on http://localhost%s (graph: %s, events: %s)\n", uiAddr, uiGraph, uiEvents)
 		return http.ListenAndServe(uiAddr, mux)
 	},
 }
@@ -105,4 +115,5 @@ func init() {
 	rootCmd.AddCommand(uiCmd)
 	uiCmd.Flags().StringVar(&uiAddr, "addr", ":8080", "address to listen on (e.g. :8080)")
 	uiCmd.Flags().StringVar(&uiGraph, "graph", "", "path to graph.json to serve at /graph.json")
+	uiCmd.Flags().StringVar(&uiEvents, "events", "", "path to events.json to serve at /events.json")
 }

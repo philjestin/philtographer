@@ -67,6 +67,7 @@ func TestBuildGraphFromEntries_TransitiveAndExternals(t *testing.T) {
 	a := filepath.Join(dir, "a.ts")
 	b := filepath.Join(dir, "b.ts")
 	c := filepath.Join(dir, "c.ts")
+	spec := filepath.Join(dir, "ignored.spec.tsx")
 	if err := os.WriteFile(a, []byte("import './b'; import React from 'react';"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -74,6 +75,9 @@ func TestBuildGraphFromEntries_TransitiveAndExternals(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(c, []byte("export default 42"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(spec, []byte("export default ()=>null"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

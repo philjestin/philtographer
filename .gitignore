@@ -48,3 +48,5 @@ philtographer.config.json
 philtographer.config.yaml
 component-graph.json
 graph.json
+
+./tmp/

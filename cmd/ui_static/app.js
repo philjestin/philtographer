@@ -17,15 +17,19 @@
   const fitViewBtn = document.getElementById('fitView');
   const themeToggle = document.getElementById('themeToggle');
   const tooltip = document.getElementById('tooltip');
+  const changedList = document.getElementById('changedList');
+  const impactedList = document.getElementById('impactedList');
+  const resizer = document.getElementById('resizer');
 
   const hasPixi = typeof PIXI !== 'undefined';
   const Viewport = (typeof pixi_viewport !== 'undefined' && pixi_viewport.Viewport) || (PIXI && PIXI.Viewport);
 
   function getSize() {
     const headerH = headerEl ? headerEl.offsetHeight : 0;
-    const width = window.innerWidth || document.documentElement.clientWidth || 800;
     const height = (window.innerHeight || document.documentElement.clientHeight || 600) - headerH;
-    return { width, height: Math.max(200, height) };
+    // Use the actual width of the stage container so the canvas never overlaps the sidebar
+    const stageW = (stageEl && stageEl.clientWidth) ? stageEl.clientWidth : ((window.innerWidth || document.documentElement.clientWidth || 800));
+    return { width: Math.max(200, stageW), height: Math.max(200, height) };
   }
 
   const initSize = getSize();
@@ -44,7 +48,7 @@
   }
 
   const isYaml = (id) => /\.ya?ml$/i.test(id);
-  const isTest = (id) => /\.test\.(tsx?|jsx?)$/i.test(id);
+  const isTest = (id) => /(^|\/)__(tests|spec)s?__(\/|$)/i.test(id) || /\.(test|spec)\.(tsx?|jsx?)$/i.test(id) || /enzyme\.test\.(tsx?|jsx?)$/i.test(id);
 
   const degree = new Map();
   const nodesAll = (graph.nodes || []);
@@ -260,4 +264,70 @@
   themeToggle?.addEventListener('change', () => { applyTheme(!!themeToggle.checked); });
   applyTheme(true);
   window.addEventListener('resize', onResize);
+  // Also react to flex layout changes (e.g., sidebar size) using a ResizeObserver on the stage container
+  if (window.ResizeObserver) { const ro = new ResizeObserver(() => onResize()); ro.observe(stageEl); }
+
+  // Drag-to-resize sidebar
+  if (resizer) {
+    let dragging = false;
+    let startX = 0;
+    let startWidth = 0;
+    const sidebar = document.getElementById('sidebar');
+    resizer.addEventListener('pointerdown', (e) => {
+      dragging = true; startX = e.clientX; startWidth = sidebar.offsetWidth; resizer.setPointerCapture(e.pointerId);
+    });
+    resizer.addEventListener('pointermove', (e) => {
+      if (!dragging) return; const dx = e.clientX - startX; // drag right grows sidebar
+      let newWidth = Math.min(Math.max(240, startWidth + dx), Math.floor(window.innerWidth * 0.6));
+      sidebar.style.width = newWidth + 'px'; onResize();
+    });
+    const stop = () => { dragging = false; };
+    resizer.addEventListener('pointerup', stop);
+    resizer.addEventListener('pointercancel', stop);
+    // Also stop on leaving window
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
+  }
+
+  // Live updates: poll events.json periodically (simpler than websockets for now)
+  let lastTs = 0;
+  async function pollEvents() {
+    try {
+      const res = await fetch('/events.json', { cache: 'no-cache' });
+      if (!res.ok) return;
+      const evt = await res.json();
+      if (!evt || typeof evt.ts !== 'number') return;
+      if (evt.ts <= lastTs) return;
+      lastTs = evt.ts;
+      // reload graph.json on update, then focus impacted
+      const gres = await fetch('/graph.json', { cache: 'no-cache' });
+      if (gres.ok) {
+        graph = await gres.json();
+        full = computeFiltered(); nodes = full.nodes; links = full.links; rebuildAdjacency(); simulation.nodes(nodes); simulation.force('link').links(links); simulation.alpha(0.4).restart(); createScene(); status.textContent = `Nodes: ${nodes.length}, Edges: ${links.length}`;
+        // show changed files and focus impacted
+        renderDiff(evt.changed, evt.impacted);
+        // If no impacted provided, at least try to select the first changed file
+        const list = Array.isArray(evt.impacted) && evt.impacted.length ? evt.impacted : (Array.isArray(evt.changed) ? evt.changed : []);
+        if (list.length) { const set = new Set(list.filter(Boolean)); applyFocus(set); selectedId = list[0]; highlightSelected(); }
+      }
+    } catch (e) {
+      // ignore transient errors
+    } finally {
+      setTimeout(pollEvents, 1500);
+    }
+  }
+  pollEvents();
+
+  function renderDiff(changed, impacted) {
+    const c = Array.isArray(changed) ? changed : [];
+    const i = Array.isArray(impacted) ? impacted : [];
+    if (changedList) {
+      changedList.innerHTML = '';
+      for (const f of c) { const chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = f; chip.title = f; chip.addEventListener('click',()=>{ searchInput.value=f; selectedId=f; highlightSelected(); focusOn(f); }); changedList.appendChild(chip); }
+    }
+    if (impactedList) {
+      impactedList.innerHTML = '';
+      for (const f of i) { const chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = f; chip.title = f; chip.addEventListener('click',()=>{ searchInput.value=f; selectedId=f; highlightSelected(); focusOn(f); }); impactedList.appendChild(chip); }
+    }
+  }
 })();
