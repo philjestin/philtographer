@@ -112,63 +112,26 @@ func ParseImports(content string) []string {
 //
 // This currently only hands relative paths
 func Resolve(fromFile, spec string) (string, error) {
-	// Leave non-relative imports (packages, absolute aliases) as is for now.
-	if !(strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../") || strings.HasPrefix(spec, "/")) {
-		return "pkg:" + spec, nil
-	}
-
-	// Build a candidate path.
-	// Find the directory of fromFile, join it with spec to get the target path and remove the relative path
-	// string safely
-	base := filepath.Dir(fromFile)
-	candidate := filepath.Clean(filepath.Join(base, spec))
-
-	// exact path as given, if it already has an extension
-	if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-		return candidate, nil
-	}
-
-	// Try common extensions
-	extensions := []string{".ts", ".tsx", ".js", ".jsx"}
-	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-		// try index/barrel files
-		for _, extension := range extensions {
-			try := filepath.Join(candidate, "index"+extension)
-			if info2, err2 := os.Stat(try); err2 == nil && !info2.IsDir() {
-				return try, nil
-			}
+	// Use tsconfig-aware resolver. Heuristic: walk up to find root (go.mod or .git), else base dir.
+	root := filepath.Dir(fromFile)
+	for i := 0; i < 8; i++ {
+		d := filepath.Dir(root)
+		if _, err := os.Stat(filepath.Join(d, "go.mod")); err == nil {
+			root = d
+			break
 		}
-	}
-
-	// Try appending extensions when candidate has no extension
-	if filepath.Ext(candidate) == "" {
-		for _, extension := range extensions {
-			try := candidate + extension
-			if info, err := os.Stat(try); err == nil && !info.IsDir() {
-				return try, nil
-			}
+		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
+			root = d
+			break
 		}
+		root = d
 	}
-
-	// build an error showing what we tried
-	var attempts []string
-	// record directory barrel attempts
-	if fi, err := os.Stat(candidate); err == nil && fi.IsDir() {
-		for _, extension := range extensions {
-			attempts = append(attempts, filepath.Join(candidate, "index"+extension))
-		}
+	res := NewResolver(root)
+	if to, err := res.Resolve(fromFile, spec); err == nil && to != "" {
+		return to, nil
 	}
-
-	// record extension attempts if no extension
-	if filepath.Ext(candidate) == "" {
-		attempts = append(attempts, candidate)
-	}
-
-	if len(attempts) == 0 {
-		attempts = []string{candidate}
-	}
-
-	return "", fmt.Errorf("could not resolve %q from %q; tried: %v", spec, fromFile, attempts)
+	// Fallback to relative resolution for safety
+	return resolveFile(fromFile, spec)
 }
 
 // Walks through a source tree, parses imports, and builds a directed dependency graph concurrently.
@@ -197,7 +160,7 @@ func BuildGraph(ctx context.Context, root string) (*graph.Graph, error) {
 				}
 				return nil
 			}
-            if isSource(path) {
+			if isSource(path) {
 				fileChannel <- path
 			}
 			return nil

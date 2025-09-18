@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	scan "github.com/philjestin/philtographer/internal/scan"
 	sitter "github.com/smacker/go-tree-sitter"
 	tsx "github.com/smacker/go-tree-sitter/typescript/tsx"
 	ts "github.com/smacker/go-tree-sitter/typescript/typescript"
@@ -191,6 +192,25 @@ func ResolveImportedComponent(currentFile string, importMap map[string]string, i
 	if !ok {
 		return ""
 	}
+	// Try tsconfig-aware resolver first
+	root := filepath.Dir(currentFile)
+	for i := 0; i < 8; i++ {
+		d := filepath.Dir(root)
+		if _, err := os.Stat(filepath.Join(d, "go.mod")); err == nil {
+			root = d
+			break
+		}
+		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
+			root = d
+			break
+		}
+		root = d
+	}
+	res := scan.NewResolver(root)
+	if to, err := res.Resolve(currentFile, mod); err == nil && to != "" {
+		return to
+	}
+	// Relative fallback
 	if strings.HasPrefix(mod, "./") || strings.HasPrefix(mod, "../") || strings.HasPrefix(mod, "/") {
 		cand := filepath.Clean(filepath.Join(filepath.Dir(currentFile), mod))
 		exts := []string{".tsx", ".ts", ".jsx", ".js"}

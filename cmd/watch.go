@@ -26,6 +26,7 @@ var (
 	watchGraph        string // file to write graph json
 	watchEvents       string // file to write events json (changed + impacted)
 	watchAffectedOnly bool   // if true, write only affected subgraph to --graph after changes
+	watchPollInterval string // polling interval; if set, use polling instead of fsnotify (e.g., "2s")
 )
 
 // watchCmd watches the workspace and rebuilds the graph on changes, emitting impacted sets.
@@ -113,16 +114,31 @@ var watchCmd = &cobra.Command{
 			return err
 		}
 
-		// watcher setup
+		// If polling requested explicitly, use it
+		if strings.TrimSpace(watchPollInterval) != "" {
+			return pollLoop(cfg.Root, build, watchGraph, watchEvents)
+		}
+
+		// watcher setup (fsnotify)
 		watcher, err := fsnotify.NewWatcher()
 		if err != nil {
 			return err
 		}
 		defer watcher.Close()
 
-		// add directories recursively
+		// add directories recursively, including tsconfig alias target dirs
 		if err := addRecursive(watcher, cfg.Root); err != nil {
+			// If we hit EMFILE (too many open files), fall back to polling
+			if strings.Contains(strings.ToLower(err.Error()), "too many open files") {
+				fmt.Fprintln(os.Stderr, "[watch] too many watchers; falling back to polling")
+				return pollLoop(cfg.Root, build, watchGraph, watchEvents)
+			}
 			return err
+		}
+		// include tsconfig paths watch roots to catch alias-only edits
+		aliasDirs := scan.NewResolver(cfg.Root).WatchDirs()
+		for _, d := range aliasDirs {
+			_ = watcher.Add(d)
 		}
 
 		// debounce changes
@@ -269,6 +285,8 @@ func impactedForChanges(root string, g *graph.Graph, changed []string) []string 
 	}
 	seen := map[string]struct{}{}
 	out := []string{}
+	// Build a quick set of node keys for fallback matching
+	nodes := g.Nodes()
 	for _, c := range changed {
 		// normalize to absolute, then to cleaned path used in nodes
 		if !filepath.IsAbs(c) {
@@ -276,8 +294,38 @@ func impactedForChanges(root string, g *graph.Graph, changed []string) []string 
 				c = a
 			}
 		}
+		// resolve symlinks if possible to match how nodes were recorded
+		if real, err := filepath.EvalSymlinks(c); err == nil {
+			c = real
+		}
 		c = filepath.Clean(c)
-		for _, imp := range g.Impacted(c) {
+
+		impacted := g.Impacted(c)
+		// Fallbacks: try alternate extensions if no impacted found
+		if len(impacted) == 0 {
+			if strings.HasSuffix(c, ".ts") {
+				impacted = g.Impacted(strings.TrimSuffix(c, ".ts") + ".tsx")
+			}
+			if strings.HasSuffix(c, ".tsx") && len(impacted) == 0 {
+				impacted = g.Impacted(strings.TrimSuffix(c, ".tsx") + ".ts")
+			}
+		}
+		// Last resort: suffix match to a node key
+		if len(impacted) == 0 {
+			base := filepath.Base(c)
+			best := ""
+			for _, n := range nodes {
+				if filepath.Base(n) == base && strings.HasSuffix(n, base) {
+					best = n
+					break
+				}
+			}
+			if best != "" {
+				impacted = g.Impacted(best)
+			}
+		}
+
+		for _, imp := range impacted {
 			if _, ok := seen[imp]; ok {
 				continue
 			}
@@ -302,10 +350,62 @@ func writeJSONFile(path string, v interface{}) error {
 	return enc.Encode(v)
 }
 
+// Polling fallback loop. Scans mtimes of source files at interval and triggers rebuilds when they change.
+func pollLoop(root string, build func(context.Context, []string) (*graph.Graph, []string, error), outGraph, outEvents string) error {
+	// parse interval
+	interval := 2 * time.Second
+	if strings.TrimSpace(watchPollInterval) != "" {
+		if d, err := time.ParseDuration(watchPollInterval); err == nil {
+			interval = d
+		}
+	}
+	mtimes := map[string]time.Time{}
+	snapshot := func(recordChanges bool) []string {
+		changed := []string{}
+		filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				name := d.Name()
+				if strings.HasPrefix(name, ".") || name == "node_modules" || name == "dist" || name == "build" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !isWatchedFile(path) {
+				return nil
+			}
+			if info, err := os.Stat(path); err == nil {
+				if prev, ok := mtimes[path]; !ok || info.ModTime().After(prev) {
+					if recordChanges && ok {
+						changed = append(changed, path)
+					}
+					mtimes[path] = info.ModTime()
+				}
+			}
+			return nil
+		})
+		return changed
+	}
+	// Prime the snapshot without recording changes
+	_ = snapshot(false)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		<-ticker.C
+		changed := snapshot(true)
+		if len(changed) > 0 {
+			_ = doRebuild(root, build, outGraph, outEvents, changed, watchAffectedOnly)
+		}
+	}
+}
+
 func init() {
 	rootCmd.AddCommand(watchCmd)
 	watchCmd.Flags().StringVar(&watchMode, "mode", "scan", "build mode: scan|components")
 	watchCmd.Flags().StringVar(&watchGraph, "graph", "", "output graph.json path")
 	watchCmd.Flags().StringVar(&watchEvents, "events", "", "output events.json path (default: sibling of --graph)")
 	watchCmd.Flags().BoolVar(&watchAffectedOnly, "affected-only", false, "write only affected subgraph to --graph after each change")
+	watchCmd.Flags().StringVar(&watchPollInterval, "poll", "", "polling interval (e.g., '2s'); if set, uses polling instead of fsnotify")
 }

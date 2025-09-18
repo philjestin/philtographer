@@ -38,6 +38,7 @@
   status.textContent = 'Loading graph.json…';
 
   let graph;
+  let commonRoot = '';
   try {
     const res = await fetch('/graph.json', { cache: 'no-cache' });
     if (!res.ok) throw new Error(String(res.status));
@@ -50,6 +51,29 @@
 
   const isYaml = (id) => /\.ya?ml$/i.test(id);
   const isTest = (id) => /(^|\/)__(tests|spec)s?__(\/|$)/i.test(id) || /\.(test|spec)\.(tsx?|jsx?)$/i.test(id) || /enzyme\.test\.(tsx?|jsx?)$/i.test(id);
+
+  function computeCommonRoot(paths) {
+    if (!paths || !paths.length) return '';
+    const parts = paths[0].split('/');
+    let end = parts.length;
+    for (let i = 1; i < paths.length; i++) {
+      const p = paths[i].split('/');
+      let j = 0;
+      const m = Math.min(end, p.length);
+      while (j < m && p[j] === parts[j]) j++;
+      end = j;
+      if (end === 0) break;
+    }
+    return end > 0 ? parts.slice(0, end).join('/') : '';
+  }
+  function relPath(p) {
+    if (!p) return p;
+    if (commonRoot && p.startsWith(commonRoot)) {
+      const cut = commonRoot.endsWith('/') ? commonRoot.length : commonRoot.length + 1;
+      return p.slice(cut);
+    }
+    return p;
+  }
 
   function computeFiltered() {
     const nodesAll = (graph.nodes || []);
@@ -65,6 +89,7 @@
     return { nodes, links };
   }
 
+  commonRoot = computeCommonRoot(graph.nodes || []);
   let full = computeFiltered();
   let nodes = full.nodes;
   let links = full.links;
@@ -286,14 +311,15 @@
     let startWidth = 0;
     const sidebar = document.getElementById('sidebar');
     resizer.addEventListener('pointerdown', (e) => {
-      dragging = true; startX = e.clientX; startWidth = sidebar.offsetWidth; resizer.setPointerCapture(e.pointerId);
+      dragging = true; startX = e.clientX; startWidth = sidebar.getBoundingClientRect().width; resizer.setPointerCapture?.(e.pointerId);
+      document.body.style.cursor = 'col-resize';
     });
     resizer.addEventListener('pointermove', (e) => {
       if (!dragging) return; const dx = e.clientX - startX; // drag right grows sidebar
       let newWidth = Math.min(Math.max(240, startWidth + dx), Math.floor(window.innerWidth * 0.6));
       sidebar.style.width = newWidth + 'px'; onResize();
     });
-    const stop = () => { dragging = false; };
+    const stop = () => { dragging = false; document.body.style.cursor = ''; };
     resizer.addEventListener('pointerup', stop);
     resizer.addEventListener('pointercancel', stop);
     // Also stop on leaving window
@@ -309,6 +335,7 @@
       const r = await fetch('/events.json', { cache: 'no-cache' });
       if (!r.ok) return; const evt = await r.json(); if (!evt || typeof evt.ts !== 'number' || evt.ts <= lastTs) return; lastTs = evt.ts;
       const gres = await fetch('/graph.json', { cache: 'no-cache' }); if (!gres.ok) return; graph = await gres.json();
+      commonRoot = computeCommonRoot(graph.nodes || []);
       const fullNow = computeFiltered(); nodes = fullNow.nodes; links = fullNow.links; rebuildAdjacency(); simulation.nodes(nodes); simulation.force('link').links(links); simulation.alpha(0.4).restart(); createScene(); status.textContent = `Nodes: ${nodes.length}, Edges: ${links.length}`;
       renderDiff(evt.changed, evt.impacted);
       const list = Array.isArray(evt.impacted) && evt.impacted.length ? evt.impacted : (Array.isArray(evt.changed) ? evt.changed : []);
@@ -346,12 +373,12 @@
     if (changedList) {
       changedList.innerHTML = '';
       if (!c.length) { const span=document.createElement('span'); span.textContent='None'; span.style.opacity='0.7'; changedList.appendChild(span); }
-      for (const f of c) { const chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = f; chip.title = f; chip.addEventListener('click',()=>{ searchInput.value=f; selectedId=f; highlightSelected(); focusOn(f); }); changedList.appendChild(chip); }
+      for (const f of c) { const chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = relPath(f); chip.title = f; chip.addEventListener('click',()=>{ searchInput.value=f; selectedId=f; highlightSelected(); focusOn(f); }); changedList.appendChild(chip); }
     }
     if (impactedList) {
       impactedList.innerHTML = '';
       if (!i.length) { const span=document.createElement('span'); span.textContent='None'; span.style.opacity='0.7'; impactedList.appendChild(span); }
-      for (const f of i) { const chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = f; chip.title = f; chip.addEventListener('click',()=>{ searchInput.value=f; selectedId=f; highlightSelected(); focusOn(f); }); impactedList.appendChild(chip); }
+      for (const f of i) { const chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = relPath(f); chip.title = f; chip.addEventListener('click',()=>{ searchInput.value=f; selectedId=f; highlightSelected(); focusOn(f); }); impactedList.appendChild(chip); }
     }
     // Views: if server provided per-root graphs, offer pills to switch
     if (viewsList) {
@@ -361,7 +388,7 @@
         const makeChip = (label, on) => { const s=document.createElement('span'); s.className='chip'; s.textContent=label; s.addEventListener('click', on); return s; };
         const unionChip = makeChip('Union', () => { applyGraphUnion(); }); unionChip.classList.add('active'); viewsList.appendChild(unionChip);
         for (const gsub of graph.graphs) {
-          const chip = makeChip(gsub.root ? labelFor(gsub.root) : 'graph', () => { applyGraphSub(gsub, chip); });
+          const chip = makeChip(gsub.root ? relPath(gsub.root) : 'graph', () => { applyGraphSub(gsub, chip); });
           viewsList.appendChild(chip);
         }
         function clearActive() { viewsList.querySelectorAll('.chip').forEach(c=>c.classList.remove('active')); }
