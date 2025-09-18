@@ -49,13 +49,19 @@ Walk the entire source tree under `--root` and build a full dependency graph.
 ./bin/philtographer scan --root ./src --out graph.json
 ```
 
-- Includes **all** `.ts`/`.tsx` files (optionally `.js`/`.jsx` if enabled in resolver).  
-- Resolves relative imports into actual files; external imports are marked as `"pkg:<name>"`.  
-- Good for small/medium repos or when you want everything.
+- Resolves .ts/.tsx plus .js/.jsx, including index.* candidates
+- External/bare imports are tagged as "pkg:<name>"
+- Asset and glob imports (e.g., *.png, *.svg, ../*.jpg) are ignored
+- Unresolved relatives no longer fail the scan; a partial graph is returned
 
 ---
 
 ### `entries`
+
+- Resolves .ts/.tsx plus .js/.jsx, including index.* candidates
+- External/bare imports are tagged as "pkg:<name>"
+- Asset and glob imports (e.g., *.png, *.svg, ../*.jpg) are ignored
+- Unresolved relatives no longer fail the scan; a partial graph is returned
 
 Discover **entry points** (roots) from config providers (e.g. `roots.ts`) and build a graph of only their **reachable closure**.  
 
@@ -110,6 +116,16 @@ Build a React component-to-component usage graph by walking from discovered entr
 - Requires `entries` configured in `philtographer.config.*`.
 - Progress is printed to stderr; output is JSON written to `--out` or stdout.
 
+
+You can run without configured entries by pointing --root at an entry file or a directory with index.*:
+
+```bash
+./bin/philtographer components --root ./frontend/app --out component-graph.json
+```
+
+When entries are configured, they are discovered via rootsTs/explicit providers (same as entries).
+Progress is printed to stderr; JSON is written to --out or stdout.
+
 ---
 
 ### `isolated`
@@ -128,6 +144,12 @@ Print nodes that have no inbound or outbound edges in a previously generated gra
 ### `ui`
 
 Serve a small local UI to visualize a `graph.json` as a force‑directed graph in the browser.
+
+UI features:
+- Autosuggest search: type to see ranked node matches; ⬆/⬇ to navigate; Enter to focus.
+- Two-row header: row 1 has title + large search; row 2 has filters/actions.
+- Actions: Isolate, Subgraph, Tree layout, Force, Fit, Reset, labels toggle, hide non‑focused.
+- Dark theme toggle (default on), WebGL canvas with pan/zoom (drag, wheel, pinch).
 
 ```bash
 ./bin/philtographer ui --graph ./graph.json --addr :8080
@@ -198,6 +220,14 @@ After generating a graph, you can use the Go API directly (`graph.Impacted("path
 - `make run ARGS="scan --root ./src"` – run with args.  
 - `make test` – run tests.  
 - `make clean` – remove build artifacts.
+
+Some additional testing commands
+
+```
+go test ./internal/scan
+go test ./internal/tsgraph
+go test ./...
+```
 
 ---
 
