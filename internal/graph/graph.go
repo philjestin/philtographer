@@ -163,12 +163,49 @@ func (g *Graph) Touch(n string) {
 	}
 }
 
-// ForEachEdge calls fn for every directed edge (from -> to) in the graph.
-// It does not allocate and does not expose internal maps to callers.
-func (g *Graph) ForEachEdge(fn func(from, to string)) {
+// ForEachEdge calls visit for every directed edge in the graph.
+// visit is invoked with (from, to) for each edge.
+func (g *Graph) ForEachEdge(visit func(from, to string)) {
+	if visit == nil {
+		return
+	}
 	for from, tos := range g.edges {
 		for to := range tos {
-			fn(from, to)
+			visit(from, to)
 		}
 	}
+}
+
+// OutNeighbors returns a copy of all nodes that the given node imports (outgoing edges).
+func (g *Graph) OutNeighbors(n string) []string {
+	if n == "" {
+		return nil
+	}
+	set := g.edges[n]
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for to := range set {
+		out = append(out, to)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// InNeighbors returns a copy of all nodes that import the given node (incoming edges).
+func (g *Graph) InNeighbors(n string) []string {
+	if n == "" {
+		return nil
+	}
+	set := g.reverse[n]
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for from := range set {
+		out = append(out, from)
+	}
+	sort.Strings(out)
+	return out
 }

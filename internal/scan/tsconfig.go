@@ -56,6 +56,14 @@ func (r *Resolver) Resolve(fromFile, spec string) (string, error) {
 	if to, ok := r.resolveAlias(spec); ok {
 		return to, nil
 	}
+	// Try nearest tsconfig.json/tsconfig.base.json up from fromFile directory
+	if to, ok := r.resolveWithNearest(fromFile, spec); ok {
+		return to, nil
+	}
+	// Try baseUrl fallback (treat bare spec as relative to baseDir)
+	if to := r.resolveFromBase(spec); to != "" {
+		return to, nil
+	}
 	// Bare package: leave tagged
 	return "pkg:" + spec, nil
 }
@@ -91,6 +99,144 @@ func (r *Resolver) resolveAlias(spec string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// resolveFromBase tries to resolve a bare spec under baseUrl directory.
+func (r *Resolver) resolveFromBase(spec string) string {
+	if r.baseDir == "" {
+		return ""
+	}
+	// Join baseDir with spec and probe like resolveFile would for a relative path
+	cand := filepath.Clean(filepath.Join(r.baseDir, spec))
+	// Exact file
+	if info, err := os.Stat(cand); err == nil && !info.IsDir() {
+		return cand
+	}
+	// If directory, try index.*
+	extensions := []string{".ts", ".tsx", ".js", ".jsx"}
+	if info, err := os.Stat(cand); err == nil && info.IsDir() {
+		for _, extension := range extensions {
+			try := filepath.Join(cand, "index"+extension)
+			if info2, err2 := os.Stat(try); err2 == nil && !info2.IsDir() {
+				return try
+			}
+		}
+	}
+	// If no extension, try appending
+	if filepath.Ext(cand) == "" {
+		for _, extension := range extensions {
+			try := cand + extension
+			if info, err := os.Stat(try); err == nil && !info.IsDir() {
+				return try
+			}
+		}
+	}
+	return ""
+}
+
+// resolveWithNearest tries to load the nearest tsconfig.* above fromFile and resolve using its paths/baseUrl.
+func (r *Resolver) resolveWithNearest(fromFile, spec string) (string, bool) {
+	dir := filepath.Dir(fromFile)
+	stop := r.root
+	for {
+		baseDir, paths, ok := loadCompilerAt(dir)
+		if ok {
+			// direct match
+			if to := resolveWithPaths(baseDir, paths, spec); to != "" {
+				return to, true
+			}
+			// baseUrl fallback
+			if baseDir != "" {
+				if to := resolveFromBaseDir(baseDir, spec); to != "" {
+					return to, true
+				}
+			}
+		}
+		if dir == stop || dir == filepath.Dir(dir) {
+			break
+		}
+		dir = filepath.Dir(dir)
+	}
+	return "", false
+}
+
+// loadCompilerAt reads tsconfig.base.json or tsconfig.json in dir.
+func loadCompilerAt(dir string) (string, map[string][]string, bool) {
+	try := []string{"tsconfig.base.json", "tsconfig.json"}
+	var cfg tsConfigCompiler
+	for _, name := range try {
+		p := filepath.Join(dir, name)
+		if b, err := os.ReadFile(p); err == nil {
+			if json.Unmarshal(b, &cfg) == nil {
+				base := dir
+				if cfg.CompilerOptions.BaseURL != "" {
+					base = filepath.Clean(filepath.Join(dir, cfg.CompilerOptions.BaseURL))
+				}
+				return base, cfg.CompilerOptions.Paths, true
+			}
+		}
+	}
+	return "", nil, false
+}
+
+// resolveWithPaths replicates alias resolution against a provided paths map and baseDir.
+func resolveWithPaths(baseDir string, paths map[string][]string, spec string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	if globs, ok := paths[spec]; ok {
+		for _, g := range globs {
+			if to := resolveFromBaseDir(baseDir, g); to != "" {
+				return to
+			}
+		}
+	}
+	for pat, globs := range paths {
+		if !strings.Contains(pat, "*") {
+			continue
+		}
+		head := strings.Split(pat, "*")[0]
+		if !strings.HasPrefix(spec, head) {
+			continue
+		}
+		tail := strings.TrimPrefix(spec, head)
+		for _, g := range globs {
+			repl := strings.ReplaceAll(g, "*", tail)
+			if to := resolveFromBaseDir(baseDir, repl); to != "" {
+				return to
+			}
+		}
+	}
+	return ""
+}
+
+// resolveFromBaseDir mirrors resolveFromBase using provided baseDir.
+func resolveFromBaseDir(baseDir, spec string) string {
+	if baseDir == "" {
+		return ""
+	}
+	cand := filepath.Clean(filepath.Join(baseDir, spec))
+	if info, err := os.Stat(cand); err == nil && !info.IsDir() {
+		return cand
+	}
+	extensions := []string{".ts", ".tsx", ".js", ".jsx"}
+	if info, err := os.Stat(cand); err == nil && info.IsDir() {
+		for _, extension := range extensions {
+			try := filepath.Join(cand, "index"+extension)
+			if info2, err2 := os.Stat(try); err2 == nil && !info2.IsDir() {
+				return try
+			}
+		}
+	}
+	if filepath.Ext(cand) == "" {
+		for _, extension := range extensions {
+			try := cand + extension
+			if info, err := os.Stat(try); err == nil && !info.IsDir() {
+				return try
+			}
+		}
+	}
+	return ""
 }
 
 // probeAliasTarget resolves a tsconfig path mapping value to a concrete file.

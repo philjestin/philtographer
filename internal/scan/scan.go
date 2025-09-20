@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,17 +25,14 @@ var (
 )
 
 func isSource(path string) bool {
-	// Exclude test/spec files and common test directories
-	lower := strings.ToLower(path)
-	base := strings.ToLower(filepath.Base(path))
-	if strings.HasSuffix(base, ".spec.ts") || strings.HasSuffix(base, ".spec.tsx") ||
-		strings.HasSuffix(base, ".test.ts") || strings.HasSuffix(base, ".test.tsx") ||
-		strings.HasSuffix(base, ".enzyme.test.tsx") ||
-		strings.Contains(lower, "/spec/") || strings.Contains(lower, "/specs/") || strings.Contains(lower, "/__tests__/") {
+	ext := strings.ToLower(filepath.Ext(path))
+
+	switch ext {
+	case ".ts", ".tsx", ".js", ".jsx":
+		return true
+	default:
 		return false
 	}
-	ext := strings.ToLower(filepath.Ext(path))
-	return ext == ".ts" || ext == ".tsx"
 }
 
 type Result struct {
@@ -112,26 +110,63 @@ func ParseImports(content string) []string {
 //
 // This currently only hands relative paths
 func Resolve(fromFile, spec string) (string, error) {
-	// Use tsconfig-aware resolver. Heuristic: walk up to find root (go.mod or .git), else base dir.
-	root := filepath.Dir(fromFile)
-	for i := 0; i < 8; i++ {
-		d := filepath.Dir(root)
-		if _, err := os.Stat(filepath.Join(d, "go.mod")); err == nil {
-			root = d
-			break
-		}
-		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
-			root = d
-			break
-		}
-		root = d
+	// Leave non-relative imports (packages, absolute aliases) as is for now.
+	if !(strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../") || strings.HasPrefix(spec, "/")) {
+		return "pkg:" + spec, nil
 	}
-	res := NewResolver(root)
-	if to, err := res.Resolve(fromFile, spec); err == nil && to != "" {
-		return to, nil
+
+	// Build a candidate path.
+	// Find the directory of fromFile, join it with spec to get the target path and remove the relative path
+	// string safely
+	base := filepath.Dir(fromFile)
+	candidate := filepath.Clean(filepath.Join(base, spec))
+
+	// exact path as given, if it already has an extension
+	if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+		return candidate, nil
 	}
-	// Fallback to relative resolution for safety
-	return resolveFile(fromFile, spec)
+
+	// Try common extensions
+	extensions := []string{".ts", ".tsx", ".js", ".jsx"}
+	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+		// try index/barrel files
+		for _, extension := range extensions {
+			try := filepath.Join(candidate, "index"+extension)
+			if info2, err2 := os.Stat(try); err2 == nil && !info2.IsDir() {
+				return try, nil
+			}
+		}
+	}
+
+	// Try appending extensions when candidate has no extension
+	if filepath.Ext(candidate) == "" {
+		for _, extension := range extensions {
+			try := candidate + extension
+			if info, err := os.Stat(try); err == nil && !info.IsDir() {
+				return try, nil
+			}
+		}
+	}
+
+	// build an error showing what we tried
+	var attempts []string
+	// record directory barrel attempts
+	if fi, err := os.Stat(candidate); err == nil && fi.IsDir() {
+		for _, extension := range extensions {
+			attempts = append(attempts, filepath.Join(candidate, "index"+extension))
+		}
+	}
+
+	// record extension attempts if no extension
+	if filepath.Ext(candidate) == "" {
+		attempts = append(attempts, candidate)
+	}
+
+	if len(attempts) == 0 {
+		attempts = []string{candidate}
+	}
+
+	return "", fmt.Errorf("could not resolve %q from %q; tried: %v", spec, fromFile, attempts)
 }
 
 // Walks through a source tree, parses imports, and builds a directed dependency graph concurrently.
@@ -140,6 +175,8 @@ func Resolve(fromFile, spec string) (string, error) {
 // returns a pointer to graph.Graph containing dependency edges between files.
 func BuildGraph(ctx context.Context, root string) (*graph.Graph, error) {
 	g := graph.New()
+	// Use tsconfig-aware resolver for aliases/baseUrl.
+	resolver := NewResolver(root)
 	// Channel of file paths (producer-consumer pattern here)
 	fileChannel := make(chan string, 1024)
 	// A channel of results from worker go routines
@@ -168,9 +205,14 @@ func BuildGraph(ctx context.Context, root string) (*graph.Graph, error) {
 		close(fileChannel)
 	}()
 
-	// workers
+	// workers (cap via env PHILTOGRAPHER_WORKERS)
 	var wg sync.WaitGroup
 	workers := runtime.NumCPU()
+	if s := strings.TrimSpace(os.Getenv("PHILTOGRAPHER_WORKERS")); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			workers = n
+		}
+	}
 	wg.Add(workers)
 	for i := 0; i < workers; i++ {
 		go func() {
@@ -181,11 +223,7 @@ func BuildGraph(ctx context.Context, root string) (*graph.Graph, error) {
 					resultChannel <- Result{File: path, Err: err}
 					continue
 				}
-				// Prefer AST-based import extraction; fallback to regex if needed
-				imports := parseImportsAST(path, data)
-				if len(imports) == 0 {
-					imports = ParseImports(string(data))
-				}
+				imports := ParseImports(string(data))
 				resultChannel <- Result{File: path, Imports: imports, Err: nil}
 			}
 		}()
@@ -223,7 +261,7 @@ func BuildGraph(ctx context.Context, root string) (*graph.Graph, error) {
 			g.Touch(r.File)
 
 			for _, spec := range r.Imports {
-				to, err := Resolve(r.File, spec)
+				to, err := resolver.Resolve(r.File, spec)
 				if err != nil {
 					// Only treat as unresolved if it was a relative spec;
 					// externals are now dropped/kept without error.
@@ -279,6 +317,8 @@ func FirstLines(path string, n int) (string, error) {
 // which is better for MPAs (Rails + many React roots) and faster on large repos.
 func BuildGraphFromEntries(ctx context.Context, root string, entries []Entry) (*graph.Graph, error) {
 	g := graph.New()
+	// Use tsconfig-aware resolver for aliases/baseUrl.
+	resolver := NewResolver(root)
 
 	// queue carries files to visit; we close it automatically when "inflight" hits zero.
 	queue := make(chan string, 4096)
@@ -313,6 +353,11 @@ func BuildGraphFromEntries(ctx context.Context, root string, entries []Entry) (*
 
 	// Spin up workers to process the queue concurrently.
 	workers := runtime.NumCPU()
+	if s := strings.TrimSpace(os.Getenv("PHILTOGRAPHER_WORKERS")); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			workers = n
+		}
+	}
 	var wg sync.WaitGroup
 	wg.Add(workers)
 
@@ -334,7 +379,7 @@ func BuildGraphFromEntries(ctx context.Context, root string, entries []Entry) (*
 					if err == nil {
 						g.Touch(path)
 						for _, spec := range ParseImports(string(data)) {
-							to, rerr := Resolve(path, spec)
+							to, rerr := resolver.Resolve(path, spec)
 							if rerr == nil {
 								// Record the edge no matter if it's internal or external (pkg:...).
 								g.AddEdge(path, to)

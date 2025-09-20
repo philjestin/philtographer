@@ -164,6 +164,7 @@ Flags:
 - `--graph`: output graph JSON path
 - `--events`: output events JSON path (changed + impacted)
 - `--affected-only`: write a subgraph after each change (smaller + faster)
+- `--include-deps`: also include forward transitive dependencies from importer seeds (context)
 
 When `--affected-only` is used, `graph.json` includes both the union subgraph and per-changed roots:
 
@@ -177,6 +178,13 @@ When `--affected-only` is used, `graph.json` includes both the union subgraph an
   ]
 }
 ```
+
+Nuances:
+
+- **Impacted (default)**: reverse transitive dependents of the changed file(s) — what might break.
+- **Context (optional)**: pass `--include-deps` to add the forward transitive dependencies starting from the importer seeds. This gives the full neighborhood but is noisier.
+- **Barrels**: if a changed file is a barrel (e.g., `index.ts`) with no direct importers, the tool falls back to include importers of files it re-exports.
+- **Large repos**: if you hit “too many open files”, pass `--poll 2s` to use polling instead of per-directory watchers. You can also cap workers with `PHILTOGRAPHER_WORKERS=4`.
 
 ### `ui`
 

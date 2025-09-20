@@ -27,6 +27,7 @@ var (
 	watchEvents       string // file to write events json (changed + impacted)
 	watchAffectedOnly bool   // if true, write only affected subgraph to --graph after changes
 	watchPollInterval string // polling interval; if set, use polling instead of fsnotify (e.g., "2s")
+	watchIncludeDeps  bool   // if true, include forward transitive deps from importer seeds
 )
 
 // watchCmd watches the workspace and rebuilds the graph on changes, emitting impacted sets.
@@ -225,11 +226,43 @@ func filterSubgraph(g *graph.Graph, keep map[string]bool) interface{} {
 	}
 	type edge struct{ From, To string }
 	edges := []edge{}
+	// Build a set for deduplication and a simple adjacency for 2-hop flattening
+	edgeSet := map[string]map[string]bool{}
 	g.ForEachEdge(func(from, to string) {
 		if keep[from] && keep[to] {
-			edges = append(edges, edge{From: from, To: to})
+			if _, ok := edgeSet[from]; !ok {
+				edgeSet[from] = map[string]bool{}
+			}
+			if !edgeSet[from][to] {
+				edgeSet[from][to] = true
+				edges = append(edges, edge{From: from, To: to})
+			}
 		}
 	})
+
+	// Flatten simple barrel paths inside the subgraph:
+	// for each from->mid and mid->to (all within keep), add a synthetic from->to edge.
+	for from, mids := range edgeSet {
+		for mid := range mids {
+			tos, ok := edgeSet[mid]
+			if !ok {
+				continue
+			}
+			for to := range tos {
+				if from == to {
+					continue
+				}
+				if _, ok := edgeSet[from]; !ok {
+					edgeSet[from] = map[string]bool{}
+				}
+				if edgeSet[from][to] {
+					continue
+				}
+				edgeSet[from][to] = true
+				edges = append(edges, edge{From: from, To: to})
+			}
+		}
+	}
 	return struct {
 		Nodes []string `json:"nodes"`
 		Edges []edge   `json:"edges"`
@@ -300,14 +333,70 @@ func impactedForChanges(root string, g *graph.Graph, changed []string) []string 
 		}
 		c = filepath.Clean(c)
 
-		impacted := g.Impacted(c)
+		// Seed with direct importers (incoming edges)
+		impacted := g.InNeighbors(c)
+		// Also include the changed file's immediate outgoing deps (to capture barrel targets)
+		for _, dep := range g.OutNeighbors(c) {
+			impacted = append(impacted, dep)
+		}
 		// Fallbacks: try alternate extensions if no impacted found
 		if len(impacted) == 0 {
 			if strings.HasSuffix(c, ".ts") {
-				impacted = g.Impacted(strings.TrimSuffix(c, ".ts") + ".tsx")
+				impacted = g.InNeighbors(strings.TrimSuffix(c, ".ts") + ".tsx")
 			}
 			if strings.HasSuffix(c, ".tsx") && len(impacted) == 0 {
-				impacted = g.Impacted(strings.TrimSuffix(c, ".tsx") + ".ts")
+				impacted = g.InNeighbors(strings.TrimSuffix(c, ".tsx") + ".ts")
+			}
+		}
+		// Barrel expansion (fallback only): if this is an index.* and no direct importers were found,
+		// include importers of its direct re-export targets to approximate impact.
+		if len(impacted) == 0 {
+			base := filepath.Base(c)
+			if base == "index.ts" || base == "index.tsx" || base == "index.js" || base == "index.jsx" {
+				deps := []string{}
+				g.ForEachEdge(func(from, to string) {
+					if from == c {
+						deps = append(deps, to)
+					}
+				})
+				for _, d := range deps {
+					more := g.InNeighbors(d)
+					if len(more) > 0 {
+						impacted = append(impacted, more...)
+					}
+				}
+			}
+		}
+
+		// Optionally include forward closure for context
+		if watchIncludeDeps {
+			q := []string{}
+			inKeep := map[string]bool{}
+			for _, n := range impacted {
+				if strings.HasPrefix(n, "pkg:") {
+					continue
+				}
+				if !inKeep[n] {
+					inKeep[n] = true
+					q = append(q, n)
+				}
+			}
+			for len(q) > 0 {
+				n := q[0]
+				q = q[1:]
+				for _, dep := range g.OutNeighbors(n) {
+					if strings.HasPrefix(dep, "pkg:") {
+						continue
+					}
+					if !inKeep[dep] {
+						inKeep[dep] = true
+						q = append(q, dep)
+					}
+				}
+			}
+			// Merge forward closure into impacted list
+			for n := range inKeep {
+				impacted = append(impacted, n)
 			}
 		}
 		// Last resort: suffix match to a node key
@@ -408,4 +497,5 @@ func init() {
 	watchCmd.Flags().StringVar(&watchEvents, "events", "", "output events.json path (default: sibling of --graph)")
 	watchCmd.Flags().BoolVar(&watchAffectedOnly, "affected-only", false, "write only affected subgraph to --graph after each change")
 	watchCmd.Flags().StringVar(&watchPollInterval, "poll", "", "polling interval (e.g., '2s'); if set, uses polling instead of fsnotify")
+	watchCmd.Flags().BoolVar(&watchIncludeDeps, "include-deps", false, "include forward transitive dependencies from importer seeds in impacted set")
 }
