@@ -31,6 +31,8 @@
   const eventsPathInput = document.getElementById('eventsPath');
   const saveConfigBtn = document.getElementById('saveConfig');
   const runScanBtn = document.getElementById('runScan');
+  const startWatchBtn = document.getElementById('startWatch');
+  const stopWatchBtn = document.getElementById('stopWatch');
 
   const hasPixi = typeof PIXI !== 'undefined';
   const Viewport = (typeof pixi_viewport !== 'undefined' && pixi_viewport.Viewport) || (PIXI && PIXI.Viewport);
@@ -117,6 +119,16 @@
 
   if (saveConfigBtn) saveConfigBtn.addEventListener('click', saveConfig);
   if (runScanBtn) runScanBtn.addEventListener('click', runScan);
+  async function callWatch(action){
+    try {
+      const r = await fetch('/api/watch', { method: 'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ action }) });
+      if (!r.ok) throw new Error(String(r.status));
+      status.textContent = action === 'start' ? 'Watcher started' : 'Watcher stopped';
+      setTimeout(()=>{ status.textContent = `Nodes: ${nodes.length}, Edges: ${links.length}`; }, 1000);
+    } catch(e) { console.error(e); status.textContent = 'Watch error'; }
+  }
+  if (startWatchBtn) startWatchBtn.addEventListener('click', ()=>callWatch('start'));
+  if (stopWatchBtn) stopWatchBtn.addEventListener('click', ()=>callWatch('stop'));
 
   const isYaml = (id) => /\.ya?ml$/i.test(id);
   const isTest = (id) => /(^|\/)__(tests|spec)s?__(\/|$)/i.test(id) || /\.(test|spec)\.(tsx?|jsx?)$/i.test(id) || /enzyme\.test\.(tsx?|jsx?)$/i.test(id);

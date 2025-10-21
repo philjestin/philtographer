@@ -19,6 +19,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/spf13/cobra"
 
+	"github.com/philjestin/philtographer/internal/graph"
 	"github.com/philjestin/philtographer/internal/scan"
 	"github.com/philjestin/philtographer/internal/scan/providers"
 	"github.com/philjestin/philtographer/internal/tsgraph"
@@ -35,6 +36,10 @@ var (
 	uiIncludeDeps  bool
 	uiAffectedOnly bool
 	uiConfig       scan.Config
+
+	// background watcher state
+	uiWatchMu     sync.Mutex
+	uiWatchCancel context.CancelFunc
 )
 
 // uiCmd serves a small static UI to visualize a graph.json via D3.
@@ -232,6 +237,28 @@ var uiCmd = &cobra.Command{
 			_ = writeJSONFile(uiEvents, evt)
 			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		})
+
+		// Start/Stop background watching without CLI
+		mux.HandleFunc("/api/watch", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			var in struct {
+				Action string `json:"action"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&in)
+			switch strings.ToLower(strings.TrimSpace(in.Action)) {
+			case "start":
+				startUIWatcher()
+				writeJSON(w, http.StatusOK, map[string]string{"status": "watching"})
+			case "stop":
+				stopUIWatcher()
+				writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+			default:
+				http.Error(w, "action must be start or stop", http.StatusBadRequest)
+			}
+		})
 		log.Printf("UI listening on http://localhost%s (graph: %s, events: %s)\n", uiAddr, uiGraph, uiEvents)
 		return http.ListenAndServe(uiAddr, mux)
 	},
@@ -270,6 +297,133 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// startUIWatcher launches a background fsnotify-based watcher that mirrors the CLI watch behavior.
+func startUIWatcher() {
+	uiWatchMu.Lock()
+	defer uiWatchMu.Unlock()
+	if uiWatchCancel != nil {
+		uiWatchCancel()
+		uiWatchCancel = nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	uiWatchCancel = cancel
+	go runUIWatcher(ctx)
+}
+
+func stopUIWatcher() {
+	uiWatchMu.Lock()
+	defer uiWatchMu.Unlock()
+	if uiWatchCancel != nil {
+		uiWatchCancel()
+		uiWatchCancel = nil
+	}
+}
+
+func runUIWatcher(ctx context.Context) {
+	root := uiConfig.Root
+	if strings.TrimSpace(root) == "" {
+		root = "."
+	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Println("ui watch:", err)
+		return
+	}
+	defer watcher.Close()
+	if _, err := addRecursiveWithCount(watcher, root); err != nil {
+		log.Println("ui watch add:", err)
+	}
+	for _, d := range scan.NewResolver(root).WatchDirs() {
+		_ = watcher.Add(d)
+	}
+	var mu sync.Mutex
+	pending := map[string]struct{}{}
+	var timer *time.Timer
+	flush := func() {
+		mu.Lock()
+		files := make([]string, 0, len(pending))
+		for f := range pending {
+			files = append(files, f)
+		}
+		pending = map[string]struct{}{}
+		mu.Unlock()
+		if len(files) == 0 {
+			return
+		}
+		build := func(ctx context.Context, changed []string) (*graph.Graph, []string, error) {
+			switch uiMode {
+			case "components":
+				var provs []providers.Provider
+				for _, spec := range uiConfig.Entries {
+					switch spec.Type {
+					case "rootsTs":
+						provs = append(provs, providers.RootsTsProvider{File: spec.File, NameFrom: spec.NameFrom})
+					case "explicit":
+						provs = append(provs, providers.ExplicitProvider{Name: spec.Name, Path: spec.Path})
+					}
+				}
+				seen := map[string]bool{}
+				var entryPaths []string
+				for _, p := range provs {
+					es, err := p.Discover(ctx, root)
+					if err != nil {
+						return nil, nil, err
+					}
+					for _, e := range es {
+						if !seen[e.Path] {
+							seen[e.Path] = true
+							entryPaths = append(entryPaths, e.Path)
+						}
+					}
+				}
+				if len(entryPaths) == 0 {
+					entryPaths = []string{root}
+				}
+				g, err := tsgraph.BuildComponentGraphFromEntries(ctx, root, entryPaths)
+				if err != nil {
+					return g, nil, err
+				}
+				return g, impactedForChanges(root, g, changed), nil
+			default:
+				g, err := scan.BuildGraph(ctx, root)
+				if err != nil {
+					return g, nil, err
+				}
+				return g, impactedForChanges(root, g, changed), nil
+			}
+		}
+		_ = doRebuild(root, build, uiGraph, uiEvents, files, uiAffectedOnly)
+	}
+	schedule := func() {
+		if timer != nil {
+			timer.Stop()
+		}
+		timer = time.AfterFunc(120*time.Millisecond, flush)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev := <-watcher.Events:
+			if !isWatchedFile(ev.Name) {
+				continue
+			}
+			p := ev.Name
+			if !filepath.IsAbs(p) {
+				if a, err := filepath.Abs(p); err == nil {
+					p = a
+				}
+			}
+			mu.Lock()
+			pending[filepath.Clean(p)] = struct{}{}
+			mu.Unlock()
+			schedule()
+		case err := <-watcher.Errors:
+			log.Println("ui watch error:", err)
+		}
+	}
 }
 
 // --- SSE push for live updates ---
