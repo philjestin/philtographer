@@ -1,9 +1,9 @@
 package cmd
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"mime"
@@ -18,15 +18,23 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/gorilla/websocket"
 	"github.com/spf13/cobra"
+
+	"github.com/philjestin/philtographer/internal/scan"
+	"github.com/philjestin/philtographer/internal/scan/providers"
+	"github.com/philjestin/philtographer/internal/tsgraph"
 )
 
 //go:embed ui_static/*
 var uiFS embed.FS
 
 var (
-	uiAddr   string
-	uiGraph  string
-	uiEvents string
+	uiAddr         string
+	uiGraph        string
+	uiEvents       string
+	uiMode         = "scan" // scan | components
+	uiIncludeDeps  bool
+	uiAffectedOnly bool
+	uiConfig       scan.Config
 )
 
 // uiCmd serves a small static UI to visualize a graph.json via D3.
@@ -34,19 +42,17 @@ var uiCmd = &cobra.Command{
 	Use:   "ui",
 	Short: "Serve a local UI for viewing graph.json as a force-directed graph",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if uiGraph == "" {
-			return fmt.Errorf("--graph is required (path to graph.json)")
+		// Default to tmp graph/events if not provided, and ensure valid JSON files exist
+		if strings.TrimSpace(uiGraph) == "" {
+			uiGraph = filepath.Join("tmp", "graph.json")
 		}
-		// Validate graph file exists and is valid JSON once on startup for faster feedback.
-		f, err := os.Open(uiGraph)
-		if err != nil {
-			return fmt.Errorf("open --graph: %w", err)
+		if strings.TrimSpace(uiEvents) == "" {
+			uiEvents = filepath.Join("tmp", "events.json")
 		}
-		defer f.Close()
-		var tmp interface{}
-		if err := json.NewDecoder(f).Decode(&tmp); err != nil {
-			return fmt.Errorf("invalid graph JSON: %w", err)
-		}
+		_ = os.MkdirAll(filepath.Dir(uiGraph), 0o755)
+		_ = os.MkdirAll(filepath.Dir(uiEvents), 0o755)
+		ensureJSONFile(uiGraph, map[string]interface{}{"nodes": []string{}, "edges": []map[string]string{}})
+		ensureJSONFile(uiEvents, map[string]interface{}{"ts": 0, "changed": []string{}, "impacted": []string{}})
 
 		mux := http.NewServeMux()
 		// Serve embedded static files
@@ -102,6 +108,130 @@ var uiCmd = &cobra.Command{
 		}
 		// Start file watcher to notify clients on changes
 		startFileWatcher(uiGraph, uiEvents)
+
+		// API endpoints for config management and triggering scans
+		mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				writeJSON(w, http.StatusOK, map[string]interface{}{
+					"config":       uiConfig,
+					"mode":         uiMode,
+					"includeDeps":  uiIncludeDeps,
+					"affectedOnly": uiAffectedOnly,
+					"graphPath":    uiGraph,
+					"eventsPath":   uiEvents,
+				})
+			case http.MethodPost:
+				var in struct {
+					Config       scan.Config `json:"config"`
+					Mode         string      `json:"mode"`
+					IncludeDeps  bool        `json:"includeDeps"`
+					AffectedOnly bool        `json:"affectedOnly"`
+					GraphPath    string      `json:"graphPath"`
+					EventsPath   string      `json:"eventsPath"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+					http.Error(w, "bad json", http.StatusBadRequest)
+					return
+				}
+				uiConfig = in.Config
+				if uiConfig.Root == "" {
+					uiConfig.Root = "."
+				}
+				if in.Mode == "components" {
+					uiMode = "components"
+				} else {
+					uiMode = "scan"
+				}
+				uiIncludeDeps = in.IncludeDeps
+				uiAffectedOnly = in.AffectedOnly
+				if s := strings.TrimSpace(in.GraphPath); s != "" {
+					uiGraph = s
+				}
+				if s := strings.TrimSpace(in.EventsPath); s != "" {
+					uiEvents = s
+				}
+				_ = os.MkdirAll(filepath.Dir(uiGraph), 0o755)
+				_ = os.MkdirAll(filepath.Dir(uiEvents), 0o755)
+				ensureJSONFile(uiGraph, map[string]interface{}{"nodes": []string{}, "edges": []map[string]string{}})
+				ensureJSONFile(uiEvents, map[string]interface{}{"ts": time.Now().UnixMilli(), "changed": []string{}, "impacted": []string{}})
+				// begin watching new paths and notify clients to refresh
+				startFileWatcher(uiGraph, uiEvents)
+				wsBroadcast()
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				w.WriteHeader(http.StatusMethodNotAllowed)
+			}
+		})
+
+		mux.HandleFunc("/api/scan", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+			defer cancel()
+			root := uiConfig.Root
+			if root == "" {
+				root = "."
+			}
+			var outGraph interface{}
+			var err error
+			if uiMode == "components" {
+				var provs []providers.Provider
+				for _, spec := range uiConfig.Entries {
+					switch spec.Type {
+					case "rootsTs":
+						provs = append(provs, providers.RootsTsProvider{File: spec.File, NameFrom: spec.NameFrom})
+					case "explicit":
+						provs = append(provs, providers.ExplicitProvider{Name: spec.Name, Path: spec.Path})
+					}
+				}
+				seen := map[string]bool{}
+				var entryPaths []string
+				for _, p := range provs {
+					es, derr := p.Discover(ctx, root)
+					if derr != nil {
+						err = derr
+						break
+					}
+					for _, e := range es {
+						if !seen[e.Path] {
+							seen[e.Path] = true
+							entryPaths = append(entryPaths, e.Path)
+						}
+					}
+				}
+				if err == nil {
+					if len(entryPaths) == 0 {
+						entryPaths = []string{root}
+					}
+					if gg, berr := tsgraph.BuildComponentGraphFromEntries(ctx, root, entryPaths); berr == nil {
+						outGraph = gg
+					} else {
+						err = berr
+					}
+				}
+			} else {
+				outGraph, err = scan.BuildGraph(ctx, root)
+			}
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if werr := writeJSONFile(uiGraph, outGraph); werr != nil {
+				http.Error(w, werr.Error(), http.StatusInternalServerError)
+				return
+			}
+			// minimal event update to trigger UI refresh
+			evt := struct {
+				Timestamp int64    `json:"ts"`
+				Changed   []string `json:"changed"`
+				Impacted  []string `json:"impacted"`
+			}{Timestamp: time.Now().UnixMilli(), Changed: nil, Impacted: nil}
+			_ = writeJSONFile(uiEvents, evt)
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		})
 		log.Printf("UI listening on http://localhost%s (graph: %s, events: %s)\n", uiAddr, uiGraph, uiEvents)
 		return http.ListenAndServe(uiAddr, mux)
 	},
@@ -118,6 +248,28 @@ func serveGraphJSON(w http.ResponseWriter, path string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache")
 	io.Copy(w, f)
+}
+
+// ensureJSONFile creates the file with JSON content if missing or invalid.
+func ensureJSONFile(p string, v interface{}) {
+	if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+		f, err := os.Open(p)
+		if err == nil {
+			defer f.Close()
+			var tmp interface{}
+			if json.NewDecoder(f).Decode(&tmp) == nil {
+				return
+			}
+		}
+	}
+	_ = writeJSONFile(p, v)
+}
+
+// writeJSON encodes v as JSON with the given HTTP status code.
+func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 // --- SSE push for live updates ---
