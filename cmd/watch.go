@@ -125,24 +125,52 @@ var watchCmd = &cobra.Command{
 		}
 		defer watcher.Close()
 
-		// Aggressive directory watching - no polling fallback
-		watchCount, err := addRecursiveWithCount(watcher, cfg.Root)
-		if err != nil {
-			// If we hit EMFILE, increase limits and try hierarchical watching
-			if strings.Contains(strings.ToLower(err.Error()), "too many open files") {
-				fmt.Fprintf(os.Stderr, "[watch] hit watch limit at %d dirs, trying hierarchical approach\n", watchCount)
-				// Close current watcher and try hierarchical
+		// Prefer selective recursive watching using tsconfig baseUrl and paths targets under monorepo root
+		resolver := scan.NewResolver(cfg.Root)
+		aliasDirs := resolver.WatchDirs()
+		// If user provided explicit watch dirs in config, prefer those
+		if len(cfg.WatchDirs) > 0 {
+			aliasDirs = []string{}
+			for _, wd := range cfg.WatchDirs {
+				p := wd
+				if !filepath.IsAbs(p) {
+					p = filepath.Clean(filepath.Join(cfg.Root, p))
+				}
+				aliasDirs = append(aliasDirs, p)
+			}
+		}
+		// filter out root to avoid massive fanout
+		filtered := []string{}
+		for _, d := range aliasDirs {
+			if filepath.Clean(d) == filepath.Clean(cfg.Root) {
+				continue
+			}
+			filtered = append(filtered, d)
+		}
+		if len(filtered) == 0 {
+			filtered = []string{cfg.Root}
+		}
+		watchCount := 0
+		var addErr error
+		for _, d := range filtered {
+			c, e := addRecursiveWithCount(watcher, d)
+			watchCount += c
+			if e != nil {
+				addErr = e
+				break
+			}
+		}
+		if addErr != nil {
+			// If we hit system limits or our own max-dir limit, switch to hierarchical watching
+			low := strings.ToLower(addErr.Error())
+			if strings.Contains(low, "too many open files") || strings.Contains(low, "hit watch limit") {
+				fmt.Fprintf(os.Stderr, "[watch] hit watch limit at %d dirs, switching to hierarchical mode\n", watchCount)
 				watcher.Close()
 				return hierarchicalWatch(cfg.Root, build, watchGraph, watchEvents)
 			}
-			return err
+			return addErr
 		}
 		fmt.Fprintf(os.Stderr, "[watch] watching %d directories with zero-polling mode\n", watchCount)
-		// include tsconfig paths watch roots to catch alias-only edits
-		aliasDirs := scan.NewResolver(cfg.Root).WatchDirs()
-		for _, d := range aliasDirs {
-			_ = watcher.Add(d)
-		}
 
 		// Advanced debouncing and coalescing for large repos
 		var mu sync.Mutex
@@ -274,7 +302,8 @@ func isWatchedFile(p string) bool {
 // addRecursiveWithCount adds directories to watcher with large-repo optimizations, returns watch count
 func addRecursiveWithCount(w *fsnotify.Watcher, root string) (int, error) {
 	// For very large repos, limit depth and watch strategically
-	maxWatchDirs := 1000 // Default limit to prevent EMFILE on most systems
+	// Adaptive default: try a higher safe ceiling first, fall back to hierarchical if hit
+	maxWatchDirs := 4000
 	if env := os.Getenv("PHILTOGRAPHER_MAX_WATCH_DIRS"); env != "" {
 		if n, err := strconv.Atoi(env); err == nil && n > 0 {
 			maxWatchDirs = n
@@ -322,8 +351,11 @@ func addRecursiveWithCount(w *fsnotify.Watcher, root string) (int, error) {
 					watchCount++
 				}
 			} else {
-				// Hit watch limit - stop walking deeper
+				// Hit watch limit - record and stop walking deeper
 				fmt.Fprintf(os.Stderr, "[watch] hit %d directory limit at %s\n", maxWatchDirs, path)
+				if walkErr == nil {
+					walkErr = fmt.Errorf("hit watch limit at %d directories", watchCount)
+				}
 				return filepath.SkipDir
 			}
 		}
@@ -595,13 +627,21 @@ func hierarchicalWatch(root string, build func(context.Context, []string) (*grap
 	}
 	defer watcher.Close()
 
-	// Watch only top-level source directories + critical paths
-	criticalDirs := []string{
-		filepath.Join(root, "src"),
-		filepath.Join(root, "lib"),
-		filepath.Join(root, "components"),
-		filepath.Join(root, "pages"),
-		filepath.Join(root, "app"),
+	// Watch top-level source directories + tsconfig alias targets
+	criticalDirs := []string{}
+	// discover immediate children in root to avoid deep fanout
+	entries, _ := os.ReadDir(root)
+	for _, e := range entries {
+		if e.IsDir() {
+			name := e.Name()
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
+			if name == "node_modules" || name == "dist" || name == "build" || name == ".git" || name == "coverage" {
+				continue
+			}
+			criticalDirs = append(criticalDirs, filepath.Join(root, name))
+		}
 	}
 
 	watchCount := 0
@@ -629,7 +669,7 @@ func hierarchicalWatch(root string, build func(context.Context, []string) (*grap
 
 	fmt.Fprintf(os.Stderr, "[watch] hierarchical mode watching %d directories\n", watchCount)
 
-	// Use the same intelligent event batching
+	// Use the same intelligent event batching and also subscribe to new directories dynamically
 	var mu sync.Mutex
 	pending := map[string]struct{}{}
 	var timer *time.Timer

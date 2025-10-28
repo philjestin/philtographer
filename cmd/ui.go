@@ -332,11 +332,42 @@ func runUIWatcher(ctx context.Context) {
 		return
 	}
 	defer watcher.Close()
+	// Try deep watch first; on failure fall back to hierarchical strategy
 	if _, err := addRecursiveWithCount(watcher, root); err != nil {
 		log.Println("ui watch add:", err)
-	}
-	for _, d := range scan.NewResolver(root).WatchDirs() {
-		_ = watcher.Add(d)
+		_ = watcher.Close()
+		// Recreate watcher in hierarchical mode
+		w2, e2 := fsnotify.NewWatcher()
+		if e2 != nil {
+			log.Println("ui watch hier init:", e2)
+			return
+		}
+		watcher = w2
+		// Add top-level immediate children (skip common heavy/build dirs)
+		entries, _ := os.ReadDir(root)
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
+			if name == "node_modules" || name == "dist" || name == "build" || name == ".git" || name == "coverage" || name == "tmp" || name == "vendor" {
+				continue
+			}
+			_ = watcher.Add(filepath.Join(root, name))
+		}
+		_ = watcher.Add(root)
+		// include tsconfig alias target dirs
+		for _, d := range scan.NewResolver(root).WatchDirs() {
+			_ = watcher.Add(d)
+		}
+	} else {
+		// include tsconfig alias target dirs
+		for _, d := range scan.NewResolver(root).WatchDirs() {
+			_ = watcher.Add(d)
+		}
 	}
 	var mu sync.Mutex
 	pending := map[string]struct{}{}
@@ -546,7 +577,7 @@ func startFileWatcher(graphPath, eventsPath string) {
 
 func init() {
 	rootCmd.AddCommand(uiCmd)
-	uiCmd.Flags().StringVar(&uiAddr, "addr", ":8080", "address to listen on (e.g. :8080)")
+	uiCmd.Flags().StringVar(&uiAddr, "addr", ":8888", "address to listen on (e.g. :8888)")
 	uiCmd.Flags().StringVar(&uiGraph, "graph", "", "path to graph.json to serve at /graph.json")
 	uiCmd.Flags().StringVar(&uiEvents, "events", "", "path to events.json to serve at /events.json")
 }

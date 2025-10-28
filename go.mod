@@ -9,7 +9,10 @@ require (
 	github.com/spf13/viper v1.21.0
 )
 
-require golang.org/x/net v0.17.0 // indirect
+require (
+	github.com/fsnotify/fsevents v0.2.0 // indirect
+	golang.org/x/net v0.17.0 // indirect
+)
 
 require (
 	github.com/fsnotify/fsnotify v1.9.0
