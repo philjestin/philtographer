@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,7 +27,6 @@ var (
 	watchGraph        string // file to write graph json
 	watchEvents       string // file to write events json (changed + impacted)
 	watchAffectedOnly bool   // if true, write only affected subgraph to --graph after changes
-	watchPollInterval string // polling interval; if set, use polling instead of fsnotify (e.g., "2s")
 	watchIncludeDeps  bool   // if true, include forward transitive deps from importer seeds
 )
 
@@ -115,10 +115,8 @@ var watchCmd = &cobra.Command{
 			return err
 		}
 
-		// If polling requested explicitly, use it
-		if strings.TrimSpace(watchPollInterval) != "" {
-			return pollLoop(cfg.Root, build, watchGraph, watchEvents)
-		}
+		// No polling mode - always use event-driven watching
+		fmt.Fprintf(os.Stderr, "[watch] zero-polling mode enabled\n")
 
 		// watcher setup (fsnotify)
 		watcher, err := fsnotify.NewWatcher()
@@ -127,25 +125,93 @@ var watchCmd = &cobra.Command{
 		}
 		defer watcher.Close()
 
-		// add directories recursively, including tsconfig alias target dirs
-		if err := addRecursive(watcher, cfg.Root); err != nil {
-			// If we hit EMFILE (too many open files), fall back to polling
-			if strings.Contains(strings.ToLower(err.Error()), "too many open files") {
-				fmt.Fprintln(os.Stderr, "[watch] too many watchers; falling back to polling")
-				return pollLoop(cfg.Root, build, watchGraph, watchEvents)
+		// Prefer selective recursive watching using tsconfig baseUrl and paths targets under monorepo root
+		resolver := scan.NewResolver(cfg.Root)
+		aliasDirs := resolver.WatchDirs()
+		// If user provided explicit watch dirs in config, prefer those
+		if len(cfg.WatchDirs) > 0 {
+			aliasDirs = []string{}
+			for _, wd := range cfg.WatchDirs {
+				p := wd
+				if !filepath.IsAbs(p) {
+					p = filepath.Clean(filepath.Join(cfg.Root, p))
+				}
+				aliasDirs = append(aliasDirs, p)
 			}
-			return err
 		}
-		// include tsconfig paths watch roots to catch alias-only edits
-		aliasDirs := scan.NewResolver(cfg.Root).WatchDirs()
+		// filter out root to avoid massive fanout
+		filtered := []string{}
 		for _, d := range aliasDirs {
-			_ = watcher.Add(d)
+			if filepath.Clean(d) == filepath.Clean(cfg.Root) {
+				continue
+			}
+			filtered = append(filtered, d)
 		}
+		if len(filtered) == 0 {
+			filtered = []string{cfg.Root}
+		}
+		watchCount := 0
+		var addErr error
+		for _, d := range filtered {
+			c, e := addRecursiveWithCount(watcher, d)
+			watchCount += c
+			if e != nil {
+				addErr = e
+				break
+			}
+		}
+		if addErr != nil {
+			// If we hit system limits or our own max-dir limit, switch to hierarchical watching
+			low := strings.ToLower(addErr.Error())
+			if strings.Contains(low, "too many open files") || strings.Contains(low, "hit watch limit") {
+				fmt.Fprintf(os.Stderr, "[watch] hit watch limit at %d dirs, switching to hierarchical mode\n", watchCount)
+				watcher.Close()
+				return hierarchicalWatch(cfg.Root, build, watchGraph, watchEvents)
+			}
+			return addErr
+		}
+		fmt.Fprintf(os.Stderr, "[watch] watching %d directories with zero-polling mode\n", watchCount)
 
-		// debounce changes
+		// Advanced debouncing and coalescing for large repos
 		var mu sync.Mutex
 		pending := map[string]struct{}{}
 		var timer *time.Timer
+		var rebuildMu sync.Mutex
+
+		// Event pattern detection for micro-delays (zero polling approach)
+		var eventHistory []time.Time
+		var lastEventTime time.Time
+
+		// Determine optimal flush delay based on real-time event patterns
+		getOptimalDelay := func(changedFiles []string, eventGap time.Duration) time.Duration {
+			// Single file edit: near-immediate (filesystem settle time only)
+			if len(changedFiles) == 1 && eventGap > 100*time.Millisecond {
+				return 10 * time.Millisecond
+			}
+
+			// Rapid burst detected: wait for it to complete
+			if eventGap < 50*time.Millisecond {
+				return 100 * time.Millisecond
+			}
+
+			// Analyze recent event patterns for bulk operations
+			if len(eventHistory) >= 3 {
+				recent := eventHistory[len(eventHistory)-3:]
+				if recent[2].Sub(recent[0]) < 500*time.Millisecond {
+					// Git checkout, mass save, etc - wait for stabilization
+					return 500 * time.Millisecond
+				}
+			}
+
+			// Small batch of changes: minimal delay
+			if len(changedFiles) <= 5 {
+				return 50 * time.Millisecond
+			}
+
+			// Large batch: allow completion
+			return 1 * time.Second
+		}
+
 		flush := func() {
 			mu.Lock()
 			files := make([]string, 0, len(pending))
@@ -154,7 +220,43 @@ var watchCmd = &cobra.Command{
 			}
 			pending = map[string]struct{}{}
 			mu.Unlock()
+
+			if len(files) == 0 {
+				return
+			}
+
+			// Serialize rebuilds to prevent overlapping builds
+			rebuildMu.Lock()
+			fmt.Fprintf(os.Stderr, "[watch] rebuilding graph for %d changed files\n", len(files))
 			_ = doRebuild(cfg.Root, build, watchGraph, watchEvents, files, watchAffectedOnly)
+			rebuildMu.Unlock()
+		}
+
+		// Intelligent scheduling: analyze event patterns in real-time
+		scheduleFlush := func() {
+			mu.Lock()
+			files := make([]string, 0, len(pending))
+			for f := range pending {
+				files = append(files, f)
+			}
+
+			now := time.Now()
+			eventGap := now.Sub(lastEventTime)
+
+			// Track event history for pattern detection (rolling window)
+			eventHistory = append(eventHistory, now)
+			if len(eventHistory) > 10 {
+				eventHistory = eventHistory[1:]
+			}
+			lastEventTime = now
+			mu.Unlock()
+
+			delay := getOptimalDelay(files, eventGap)
+
+			if timer != nil {
+				timer.Stop()
+			}
+			timer = time.AfterFunc(delay, flush)
 		}
 
 		for {
@@ -180,11 +282,10 @@ var watchCmd = &cobra.Command{
 						}
 					}
 					pending[filepath.Clean(p)] = struct{}{}
-					if timer != nil {
-						timer.Stop()
-					}
-					timer = time.AfterFunc(300*time.Millisecond, flush)
 					mu.Unlock()
+
+					// Trigger intelligent scheduling based on event patterns
+					scheduleFlush()
 				}
 			case err := <-watcher.Errors:
 				fmt.Fprintln(os.Stderr, "watch error:", err)
@@ -198,23 +299,79 @@ func isWatchedFile(p string) bool {
 	return strings.HasSuffix(l, ".ts") || strings.HasSuffix(l, ".tsx") || strings.HasSuffix(l, ".js") || strings.HasSuffix(l, ".jsx") || strings.HasSuffix(l, ".d.ts")
 }
 
-func addRecursive(w *fsnotify.Watcher, root string) error {
-	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+// addRecursiveWithCount adds directories to watcher with large-repo optimizations, returns watch count
+func addRecursiveWithCount(w *fsnotify.Watcher, root string) (int, error) {
+	// For very large repos, limit depth and watch strategically
+	// Adaptive default: try a higher safe ceiling first, fall back to hierarchical if hit
+	maxWatchDirs := 4000
+	if env := os.Getenv("PHILTOGRAPHER_MAX_WATCH_DIRS"); env != "" {
+		if n, err := strconv.Atoi(env); err == nil && n > 0 {
+			maxWatchDirs = n
+		}
+	}
+
+	watchCount := 0
+	var walkErr error
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return nil // Continue on individual file errors
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if strings.HasPrefix(name, ".") || name == "node_modules" || name == "dist" || name == "build" {
-				if path != root {
-					return filepath.SkipDir
-				}
-				return nil
+			// Skip common build/cache/vendor dirs (configurable via ignore patterns)
+			skipDirs := []string{
+				"node_modules", "dist", "build", ".next", ".nuxt", "coverage",
+				"tmp", "temp", ".cache", "vendor", ".git", "__pycache__",
+				".pytest_cache", ".tox", ".venv", "venv", ".mypy_cache",
 			}
-			_ = w.Add(path)
+			for _, skip := range skipDirs {
+				if name == skip {
+					if path != root {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+			}
+			// Skip deep hidden dirs except at root level
+			if strings.HasPrefix(name, ".") && path != root {
+				return filepath.SkipDir
+			}
+
+			// Add directory to watcher if under limit
+			if watchCount < maxWatchDirs {
+				if err := w.Add(path); err != nil {
+					// If this specific Add fails, try to continue but record the error
+					if strings.Contains(strings.ToLower(err.Error()), "too many open files") {
+						walkErr = fmt.Errorf("hit watch limit at %d directories: %w", watchCount, err)
+						return filepath.SkipDir
+					}
+					// Other errors - continue but don't count this dir
+				} else {
+					watchCount++
+				}
+			} else {
+				// Hit watch limit - record and stop walking deeper
+				fmt.Fprintf(os.Stderr, "[watch] hit %d directory limit at %s\n", maxWatchDirs, path)
+				if walkErr == nil {
+					walkErr = fmt.Errorf("hit watch limit at %d directories", watchCount)
+				}
+				return filepath.SkipDir
+			}
 		}
 		return nil
 	})
+
+	if walkErr != nil {
+		return watchCount, walkErr
+	}
+	return watchCount, err
+}
+
+// Legacy wrapper for compatibility
+func addRecursive(w *fsnotify.Watcher, root string) error {
+	_, err := addRecursiveWithCount(w, root)
+	return err
 }
 
 // filterSubgraph returns a JSON-serializable view of only nodes in keep and edges among them.
@@ -336,9 +493,7 @@ func impactedForChanges(root string, g *graph.Graph, changed []string) []string 
 		// Seed with direct importers (incoming edges)
 		impacted := g.InNeighbors(c)
 		// Also include the changed file's immediate outgoing deps (to capture barrel targets)
-		for _, dep := range g.OutNeighbors(c) {
-			impacted = append(impacted, dep)
-		}
+		impacted = append(impacted, g.OutNeighbors(c)...)
 		// Fallbacks: try alternate extensions if no impacted found
 		if len(impacted) == 0 {
 			if strings.HasSuffix(c, ".ts") {
@@ -429,63 +584,195 @@ func writeJSONFile(path string, v interface{}) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	f, err := os.Create(path)
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+	tmp, err := os.CreateTemp(dir, "."+base+".*.tmp")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	enc := json.NewEncoder(f)
+	tmpPath := tmp.Name()
+	// ensure cleanup on failure
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	enc := json.NewEncoder(tmp)
 	enc.SetIndent("", "  ")
-	return enc.Encode(v)
+	if err := enc.Encode(v); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 
-// Polling fallback loop. Scans mtimes of source files at interval and triggers rebuilds when they change.
-func pollLoop(root string, build func(context.Context, []string) (*graph.Graph, []string, error), outGraph, outEvents string) error {
-	// parse interval
-	interval := 2 * time.Second
-	if strings.TrimSpace(watchPollInterval) != "" {
-		if d, err := time.ParseDuration(watchPollInterval); err == nil {
-			interval = d
+// hierarchicalWatch implements a hierarchical watching strategy for extremely large repos
+func hierarchicalWatch(root string, build func(context.Context, []string) (*graph.Graph, []string, error), outGraph, outEvents string) error {
+	fmt.Fprintf(os.Stderr, "[watch] starting hierarchical watch mode for large repo\n")
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return err
+	}
+	defer watcher.Close()
+
+	// Watch top-level source directories + tsconfig alias targets
+	criticalDirs := []string{}
+	// discover immediate children in root to avoid deep fanout
+	entries, _ := os.ReadDir(root)
+	for _, e := range entries {
+		if e.IsDir() {
+			name := e.Name()
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
+			if name == "node_modules" || name == "dist" || name == "build" || name == ".git" || name == "coverage" {
+				continue
+			}
+			criticalDirs = append(criticalDirs, filepath.Join(root, name))
 		}
 	}
-	mtimes := map[string]time.Time{}
-	snapshot := func(recordChanges bool) []string {
-		changed := []string{}
-		filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return nil
+
+	watchCount := 0
+	for _, dir := range criticalDirs {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			// Watch top-level only, rely on CREATE events for deeper dirs
+			if err := watcher.Add(dir); err == nil {
+				watchCount++
+				fmt.Fprintf(os.Stderr, "[watch] watching critical dir: %s\n", dir)
 			}
-			if d.IsDir() {
-				name := d.Name()
-				if strings.HasPrefix(name, ".") || name == "node_modules" || name == "dist" || name == "build" {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if !isWatchedFile(path) {
-				return nil
-			}
-			if info, err := os.Stat(path); err == nil {
-				if prev, ok := mtimes[path]; !ok || info.ModTime().After(prev) {
-					if recordChanges && ok {
-						changed = append(changed, path)
-					}
-					mtimes[path] = info.ModTime()
-				}
-			}
-			return nil
-		})
-		return changed
+		}
 	}
-	// Prime the snapshot without recording changes
-	_ = snapshot(false)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+
+	// Always watch root for new directories
+	_ = watcher.Add(root)
+	watchCount++
+
+	// Add tsconfig alias directories
+	aliasDirs := scan.NewResolver(root).WatchDirs()
+	for _, d := range aliasDirs {
+		if err := watcher.Add(d); err == nil {
+			watchCount++
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "[watch] hierarchical mode watching %d directories\n", watchCount)
+
+	// Use the same intelligent event batching and also subscribe to new directories dynamically
+	var mu sync.Mutex
+	pending := map[string]struct{}{}
+	var timer *time.Timer
+	var rebuildMu sync.Mutex
+	var eventHistory []time.Time
+	var lastEventTime time.Time
+
+	getOptimalDelay := func(changedFiles []string, eventGap time.Duration) time.Duration {
+		if len(changedFiles) == 1 && eventGap > 100*time.Millisecond {
+			return 10 * time.Millisecond
+		}
+		if eventGap < 50*time.Millisecond {
+			return 100 * time.Millisecond
+		}
+		if len(eventHistory) >= 3 {
+			recent := eventHistory[len(eventHistory)-3:]
+			if recent[2].Sub(recent[0]) < 500*time.Millisecond {
+				return 500 * time.Millisecond
+			}
+		}
+		if len(changedFiles) <= 5 {
+			return 50 * time.Millisecond
+		}
+		return 1 * time.Second
+	}
+
+	flush := func() {
+		mu.Lock()
+		files := make([]string, 0, len(pending))
+		for f := range pending {
+			files = append(files, f)
+		}
+		pending = map[string]struct{}{}
+		mu.Unlock()
+
+		if len(files) == 0 {
+			return
+		}
+
+		rebuildMu.Lock()
+		fmt.Fprintf(os.Stderr, "[watch] hierarchical rebuild for %d changed files\n", len(files))
+		_ = doRebuild(root, build, outGraph, outEvents, files, watchAffectedOnly)
+		rebuildMu.Unlock()
+	}
+
+	scheduleFlush := func() {
+		mu.Lock()
+		files := make([]string, 0, len(pending))
+		for f := range pending {
+			files = append(files, f)
+		}
+
+		now := time.Now()
+		eventGap := now.Sub(lastEventTime)
+
+		eventHistory = append(eventHistory, now)
+		if len(eventHistory) > 10 {
+			eventHistory = eventHistory[1:]
+		}
+		lastEventTime = now
+		mu.Unlock()
+
+		delay := getOptimalDelay(files, eventGap)
+
+		if timer != nil {
+			timer.Stop()
+		}
+		timer = time.AfterFunc(delay, flush)
+	}
+
 	for {
-		<-ticker.C
-		changed := snapshot(true)
-		if len(changed) > 0 {
-			_ = doRebuild(root, build, outGraph, outEvents, changed, watchAffectedOnly)
+		select {
+		case ev, ok := <-watcher.Events:
+			if !ok {
+				return nil
+			}
+			// Auto-watch new directories that are created
+			if ev.Op&fsnotify.Create == fsnotify.Create {
+				if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
+					// Only watch if it's not a build/dist dir
+					name := filepath.Base(ev.Name)
+					if !strings.HasPrefix(name, ".") && name != "node_modules" &&
+						name != "dist" && name != "build" {
+						_ = watcher.Add(ev.Name)
+					}
+					continue
+				}
+			}
+			// Process file changes
+			if isWatchedFile(ev.Name) {
+				mu.Lock()
+				p := ev.Name
+				if !filepath.IsAbs(p) {
+					if a, err := filepath.Abs(p); err == nil {
+						p = a
+					}
+				}
+				pending[filepath.Clean(p)] = struct{}{}
+				mu.Unlock()
+				scheduleFlush()
+			}
+		case err := <-watcher.Errors:
+			fmt.Fprintln(os.Stderr, "hierarchical watch error:", err)
 		}
 	}
 }
@@ -496,6 +783,6 @@ func init() {
 	watchCmd.Flags().StringVar(&watchGraph, "graph", "", "output graph.json path")
 	watchCmd.Flags().StringVar(&watchEvents, "events", "", "output events.json path (default: sibling of --graph)")
 	watchCmd.Flags().BoolVar(&watchAffectedOnly, "affected-only", false, "write only affected subgraph to --graph after each change")
-	watchCmd.Flags().StringVar(&watchPollInterval, "poll", "", "polling interval (e.g., '2s'); if set, uses polling instead of fsnotify")
+	// Polling removed - zero-polling mode always enabled
 	watchCmd.Flags().BoolVar(&watchIncludeDeps, "include-deps", false, "include forward transitive dependencies from importer seeds in impacted set")
 }

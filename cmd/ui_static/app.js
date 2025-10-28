@@ -21,6 +21,18 @@
   const impactedList = document.getElementById('impactedList');
   const viewsList = document.getElementById('viewsList');
   const resizer = document.getElementById('resizer');
+  // Config panel elements (optional)
+  const configRoot = document.getElementById('configRoot');
+  const configMode = document.getElementById('configMode');
+  const configIncludeDeps = document.getElementById('configIncludeDeps');
+  const configAffectedOnly = document.getElementById('configAffectedOnly');
+  const entriesJson = document.getElementById('entriesJson');
+  const graphPathInput = document.getElementById('graphPath');
+  const eventsPathInput = document.getElementById('eventsPath');
+  const saveConfigBtn = document.getElementById('saveConfig');
+  const runScanBtn = document.getElementById('runScan');
+  const startWatchBtn = document.getElementById('startWatch');
+  const stopWatchBtn = document.getElementById('stopWatch');
 
   const hasPixi = typeof PIXI !== 'undefined';
   const Viewport = (typeof pixi_viewport !== 'undefined' && pixi_viewport.Viewport) || (PIXI && PIXI.Viewport);
@@ -48,6 +60,75 @@
     console.error(err);
     return;
   }
+  // Load server-side config into panel (if present)
+  async function loadConfig() {
+    try {
+      const r = await fetch('/api/config', { cache: 'no-cache' });
+      if (!r.ok) return;
+      const data = await r.json();
+      const cfg = data && data.config ? data.config : {};
+      if (configRoot) configRoot.value = cfg.root || '';
+      if (configMode) configMode.value = (data.mode === 'components') ? 'components' : 'scan';
+      if (configIncludeDeps) configIncludeDeps.checked = !!data.includeDeps;
+      if (configAffectedOnly) configAffectedOnly.checked = !!data.affectedOnly;
+      if (graphPathInput) graphPathInput.value = data.graphPath || '';
+      if (eventsPathInput) eventsPathInput.value = data.eventsPath || '';
+      if (entriesJson) {
+        try { entriesJson.value = JSON.stringify(cfg.entries || [], null, 2); } catch {}
+      }
+    } catch {}
+  }
+  loadConfig();
+
+  function parseEntriesSafe(text) {
+    try { const v = JSON.parse(text || '[]'); return Array.isArray(v) ? v : []; } catch { return []; }
+  }
+
+  async function saveConfig() {
+    const body = {
+      config: {
+        root: (configRoot && configRoot.value) || '.',
+        entries: parseEntriesSafe(entriesJson && entriesJson.value)
+      },
+      mode: (configMode && configMode.value) || 'scan',
+      includeDeps: !!(configIncludeDeps && configIncludeDeps.checked),
+      affectedOnly: !!(configAffectedOnly && configAffectedOnly.checked),
+      graphPath: graphPathInput && graphPathInput.value,
+      eventsPath: eventsPathInput && eventsPathInput.value,
+    };
+    try {
+      const r = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (!r.ok) throw new Error(String(r.status));
+      status.textContent = 'Config saved';
+      setTimeout(()=>{ status.textContent = `Nodes: ${nodes.length}, Edges: ${links.length}`; }, 1000);
+    } catch (e) {
+      console.error(e); status.textContent = 'Failed to save config';
+    }
+  }
+
+  async function runScan() {
+    try {
+      const r = await fetch('/api/scan', { method: 'POST' });
+      if (!r.ok) throw new Error(String(r.status));
+      status.textContent = 'Scanning…';
+      await refreshFromServer();
+    } catch (e) {
+      console.error(e); status.textContent = 'Scan failed';
+    }
+  }
+
+  if (saveConfigBtn) saveConfigBtn.addEventListener('click', saveConfig);
+  if (runScanBtn) runScanBtn.addEventListener('click', runScan);
+  async function callWatch(action){
+    try {
+      const r = await fetch('/api/watch', { method: 'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ action }) });
+      if (!r.ok) throw new Error(String(r.status));
+      status.textContent = action === 'start' ? 'Watcher started' : 'Watcher stopped';
+      setTimeout(()=>{ status.textContent = `Nodes: ${nodes.length}, Edges: ${links.length}`; }, 1000);
+    } catch(e) { console.error(e); status.textContent = 'Watch error'; }
+  }
+  if (startWatchBtn) startWatchBtn.addEventListener('click', ()=>callWatch('start'));
+  if (stopWatchBtn) stopWatchBtn.addEventListener('click', ()=>callWatch('stop'));
 
   const isYaml = (id) => /\.ya?ml$/i.test(id);
   const isTest = (id) => /(^|\/)__(tests|spec)s?__(\/|$)/i.test(id) || /\.(test|spec)\.(tsx?|jsx?)$/i.test(id) || /enzyme\.test\.(tsx?|jsx?)$/i.test(id);

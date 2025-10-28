@@ -1,9 +1,9 @@
 package cmd
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"mime"
@@ -18,15 +18,28 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/gorilla/websocket"
 	"github.com/spf13/cobra"
+
+	"github.com/philjestin/philtographer/internal/graph"
+	"github.com/philjestin/philtographer/internal/scan"
+	"github.com/philjestin/philtographer/internal/scan/providers"
+	"github.com/philjestin/philtographer/internal/tsgraph"
 )
 
 //go:embed ui_static/*
 var uiFS embed.FS
 
 var (
-	uiAddr   string
-	uiGraph  string
-	uiEvents string
+	uiAddr         string
+	uiGraph        string
+	uiEvents       string
+	uiMode         = "scan" // scan | components
+	uiIncludeDeps  bool
+	uiAffectedOnly bool
+	uiConfig       scan.Config
+
+	// background watcher state
+	uiWatchMu     sync.Mutex
+	uiWatchCancel context.CancelFunc
 )
 
 // uiCmd serves a small static UI to visualize a graph.json via D3.
@@ -34,19 +47,17 @@ var uiCmd = &cobra.Command{
 	Use:   "ui",
 	Short: "Serve a local UI for viewing graph.json as a force-directed graph",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if uiGraph == "" {
-			return fmt.Errorf("--graph is required (path to graph.json)")
+		// Default to tmp graph/events if not provided, and ensure valid JSON files exist
+		if strings.TrimSpace(uiGraph) == "" {
+			uiGraph = filepath.Join("tmp", "graph.json")
 		}
-		// Validate graph file exists and is valid JSON once on startup for faster feedback.
-		f, err := os.Open(uiGraph)
-		if err != nil {
-			return fmt.Errorf("open --graph: %w", err)
+		if strings.TrimSpace(uiEvents) == "" {
+			uiEvents = filepath.Join("tmp", "events.json")
 		}
-		defer f.Close()
-		var tmp interface{}
-		if err := json.NewDecoder(f).Decode(&tmp); err != nil {
-			return fmt.Errorf("invalid graph JSON: %w", err)
-		}
+		_ = os.MkdirAll(filepath.Dir(uiGraph), 0o755)
+		_ = os.MkdirAll(filepath.Dir(uiEvents), 0o755)
+		ensureJSONFile(uiGraph, map[string]interface{}{"nodes": []string{}, "edges": []map[string]string{}})
+		ensureJSONFile(uiEvents, map[string]interface{}{"ts": 0, "changed": []string{}, "impacted": []string{}})
 
 		mux := http.NewServeMux()
 		// Serve embedded static files
@@ -102,6 +113,152 @@ var uiCmd = &cobra.Command{
 		}
 		// Start file watcher to notify clients on changes
 		startFileWatcher(uiGraph, uiEvents)
+
+		// API endpoints for config management and triggering scans
+		mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				writeJSON(w, http.StatusOK, map[string]interface{}{
+					"config":       uiConfig,
+					"mode":         uiMode,
+					"includeDeps":  uiIncludeDeps,
+					"affectedOnly": uiAffectedOnly,
+					"graphPath":    uiGraph,
+					"eventsPath":   uiEvents,
+				})
+			case http.MethodPost:
+				var in struct {
+					Config       scan.Config `json:"config"`
+					Mode         string      `json:"mode"`
+					IncludeDeps  bool        `json:"includeDeps"`
+					AffectedOnly bool        `json:"affectedOnly"`
+					GraphPath    string      `json:"graphPath"`
+					EventsPath   string      `json:"eventsPath"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+					http.Error(w, "bad json", http.StatusBadRequest)
+					return
+				}
+				uiConfig = in.Config
+				if uiConfig.Root == "" {
+					uiConfig.Root = "."
+				}
+				if in.Mode == "components" {
+					uiMode = "components"
+				} else {
+					uiMode = "scan"
+				}
+				uiIncludeDeps = in.IncludeDeps
+				uiAffectedOnly = in.AffectedOnly
+				if s := strings.TrimSpace(in.GraphPath); s != "" {
+					uiGraph = s
+				}
+				if s := strings.TrimSpace(in.EventsPath); s != "" {
+					uiEvents = s
+				}
+				_ = os.MkdirAll(filepath.Dir(uiGraph), 0o755)
+				_ = os.MkdirAll(filepath.Dir(uiEvents), 0o755)
+				ensureJSONFile(uiGraph, map[string]interface{}{"nodes": []string{}, "edges": []map[string]string{}})
+				ensureJSONFile(uiEvents, map[string]interface{}{"ts": time.Now().UnixMilli(), "changed": []string{}, "impacted": []string{}})
+				// begin watching new paths and notify clients to refresh
+				startFileWatcher(uiGraph, uiEvents)
+				wsBroadcast()
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				w.WriteHeader(http.StatusMethodNotAllowed)
+			}
+		})
+
+		mux.HandleFunc("/api/scan", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+			defer cancel()
+			root := uiConfig.Root
+			if root == "" {
+				root = "."
+			}
+			var outGraph interface{}
+			var err error
+			if uiMode == "components" {
+				var provs []providers.Provider
+				for _, spec := range uiConfig.Entries {
+					switch spec.Type {
+					case "rootsTs":
+						provs = append(provs, providers.RootsTsProvider{File: spec.File, NameFrom: spec.NameFrom})
+					case "explicit":
+						provs = append(provs, providers.ExplicitProvider{Name: spec.Name, Path: spec.Path})
+					}
+				}
+				seen := map[string]bool{}
+				var entryPaths []string
+				for _, p := range provs {
+					es, derr := p.Discover(ctx, root)
+					if derr != nil {
+						err = derr
+						break
+					}
+					for _, e := range es {
+						if !seen[e.Path] {
+							seen[e.Path] = true
+							entryPaths = append(entryPaths, e.Path)
+						}
+					}
+				}
+				if err == nil {
+					if len(entryPaths) == 0 {
+						entryPaths = []string{root}
+					}
+					if gg, berr := tsgraph.BuildComponentGraphFromEntries(ctx, root, entryPaths); berr == nil {
+						outGraph = gg
+					} else {
+						err = berr
+					}
+				}
+			} else {
+				outGraph, err = scan.BuildGraph(ctx, root)
+			}
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if werr := writeJSONFile(uiGraph, outGraph); werr != nil {
+				http.Error(w, werr.Error(), http.StatusInternalServerError)
+				return
+			}
+			// minimal event update to trigger UI refresh
+			evt := struct {
+				Timestamp int64    `json:"ts"`
+				Changed   []string `json:"changed"`
+				Impacted  []string `json:"impacted"`
+			}{Timestamp: time.Now().UnixMilli(), Changed: nil, Impacted: nil}
+			_ = writeJSONFile(uiEvents, evt)
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		})
+
+		// Start/Stop background watching without CLI
+		mux.HandleFunc("/api/watch", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			var in struct {
+				Action string `json:"action"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&in)
+			switch strings.ToLower(strings.TrimSpace(in.Action)) {
+			case "start":
+				startUIWatcher()
+				writeJSON(w, http.StatusOK, map[string]string{"status": "watching"})
+			case "stop":
+				stopUIWatcher()
+				writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+			default:
+				http.Error(w, "action must be start or stop", http.StatusBadRequest)
+			}
+		})
 		log.Printf("UI listening on http://localhost%s (graph: %s, events: %s)\n", uiAddr, uiGraph, uiEvents)
 		return http.ListenAndServe(uiAddr, mux)
 	},
@@ -118,6 +275,186 @@ func serveGraphJSON(w http.ResponseWriter, path string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache")
 	io.Copy(w, f)
+}
+
+// ensureJSONFile creates the file with JSON content if missing or invalid.
+func ensureJSONFile(p string, v interface{}) {
+	if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+		f, err := os.Open(p)
+		if err == nil {
+			defer f.Close()
+			var tmp interface{}
+			if json.NewDecoder(f).Decode(&tmp) == nil {
+				return
+			}
+		}
+	}
+	_ = writeJSONFile(p, v)
+}
+
+// writeJSON encodes v as JSON with the given HTTP status code.
+func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// startUIWatcher launches a background fsnotify-based watcher that mirrors the CLI watch behavior.
+func startUIWatcher() {
+	uiWatchMu.Lock()
+	defer uiWatchMu.Unlock()
+	if uiWatchCancel != nil {
+		uiWatchCancel()
+		uiWatchCancel = nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	uiWatchCancel = cancel
+	go runUIWatcher(ctx)
+}
+
+func stopUIWatcher() {
+	uiWatchMu.Lock()
+	defer uiWatchMu.Unlock()
+	if uiWatchCancel != nil {
+		uiWatchCancel()
+		uiWatchCancel = nil
+	}
+}
+
+func runUIWatcher(ctx context.Context) {
+	root := uiConfig.Root
+	if strings.TrimSpace(root) == "" {
+		root = "."
+	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Println("ui watch:", err)
+		return
+	}
+	defer watcher.Close()
+	// Try deep watch first; on failure fall back to hierarchical strategy
+	if _, err := addRecursiveWithCount(watcher, root); err != nil {
+		log.Println("ui watch add:", err)
+		_ = watcher.Close()
+		// Recreate watcher in hierarchical mode
+		w2, e2 := fsnotify.NewWatcher()
+		if e2 != nil {
+			log.Println("ui watch hier init:", e2)
+			return
+		}
+		watcher = w2
+		// Add top-level immediate children (skip common heavy/build dirs)
+		entries, _ := os.ReadDir(root)
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
+			if name == "node_modules" || name == "dist" || name == "build" || name == ".git" || name == "coverage" || name == "tmp" || name == "vendor" {
+				continue
+			}
+			_ = watcher.Add(filepath.Join(root, name))
+		}
+		_ = watcher.Add(root)
+		// include tsconfig alias target dirs
+		for _, d := range scan.NewResolver(root).WatchDirs() {
+			_ = watcher.Add(d)
+		}
+	} else {
+		// include tsconfig alias target dirs
+		for _, d := range scan.NewResolver(root).WatchDirs() {
+			_ = watcher.Add(d)
+		}
+	}
+	var mu sync.Mutex
+	pending := map[string]struct{}{}
+	var timer *time.Timer
+	flush := func() {
+		mu.Lock()
+		files := make([]string, 0, len(pending))
+		for f := range pending {
+			files = append(files, f)
+		}
+		pending = map[string]struct{}{}
+		mu.Unlock()
+		if len(files) == 0 {
+			return
+		}
+		build := func(ctx context.Context, changed []string) (*graph.Graph, []string, error) {
+			switch uiMode {
+			case "components":
+				var provs []providers.Provider
+				for _, spec := range uiConfig.Entries {
+					switch spec.Type {
+					case "rootsTs":
+						provs = append(provs, providers.RootsTsProvider{File: spec.File, NameFrom: spec.NameFrom})
+					case "explicit":
+						provs = append(provs, providers.ExplicitProvider{Name: spec.Name, Path: spec.Path})
+					}
+				}
+				seen := map[string]bool{}
+				var entryPaths []string
+				for _, p := range provs {
+					es, err := p.Discover(ctx, root)
+					if err != nil {
+						return nil, nil, err
+					}
+					for _, e := range es {
+						if !seen[e.Path] {
+							seen[e.Path] = true
+							entryPaths = append(entryPaths, e.Path)
+						}
+					}
+				}
+				if len(entryPaths) == 0 {
+					entryPaths = []string{root}
+				}
+				g, err := tsgraph.BuildComponentGraphFromEntries(ctx, root, entryPaths)
+				if err != nil {
+					return g, nil, err
+				}
+				return g, impactedForChanges(root, g, changed), nil
+			default:
+				g, err := scan.BuildGraph(ctx, root)
+				if err != nil {
+					return g, nil, err
+				}
+				return g, impactedForChanges(root, g, changed), nil
+			}
+		}
+		_ = doRebuild(root, build, uiGraph, uiEvents, files, uiAffectedOnly)
+	}
+	schedule := func() {
+		if timer != nil {
+			timer.Stop()
+		}
+		timer = time.AfterFunc(120*time.Millisecond, flush)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev := <-watcher.Events:
+			if !isWatchedFile(ev.Name) {
+				continue
+			}
+			p := ev.Name
+			if !filepath.IsAbs(p) {
+				if a, err := filepath.Abs(p); err == nil {
+					p = a
+				}
+			}
+			mu.Lock()
+			pending[filepath.Clean(p)] = struct{}{}
+			mu.Unlock()
+			schedule()
+		case err := <-watcher.Errors:
+			log.Println("ui watch error:", err)
+		}
+	}
 }
 
 // --- SSE push for live updates ---
@@ -240,7 +577,7 @@ func startFileWatcher(graphPath, eventsPath string) {
 
 func init() {
 	rootCmd.AddCommand(uiCmd)
-	uiCmd.Flags().StringVar(&uiAddr, "addr", ":8080", "address to listen on (e.g. :8080)")
+	uiCmd.Flags().StringVar(&uiAddr, "addr", ":8888", "address to listen on (e.g. :8888)")
 	uiCmd.Flags().StringVar(&uiGraph, "graph", "", "path to graph.json to serve at /graph.json")
 	uiCmd.Flags().StringVar(&uiEvents, "events", "", "path to events.json to serve at /events.json")
 }

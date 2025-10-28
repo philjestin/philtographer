@@ -47,6 +47,27 @@
       <div id="stage"></div>
       <div id="resizer" aria-hidden="true" title="Drag to resize"></div>
       <aside id="sidebar">
+        <h3>Config</h3>
+        <div id="configPanel">
+          <label>Root <input id="configRoot" type="text" placeholder="." /></label>
+          <label>Mode
+            <select id="configMode">
+              <option value="scan">scan</option>
+              <option value="components">components</option>
+            </select>
+          </label>
+          <label><input id="configIncludeDeps" type="checkbox" /> include deps</label>
+          <label><input id="configAffectedOnly" type="checkbox" /> affected-only graph</label>
+          <label>Graph <input id="graphPath" type="text" placeholder="tmp/graph.json" /></label>
+          <label>Events <input id="eventsPath" type="text" placeholder="tmp/events.json" /></label>
+          <label>Entries JSON<br><textarea id="entriesJson" rows="4" placeholder='[{"type":"explicit","name":"app","path":"src/index.tsx"}]'></textarea></label>
+          <div style="display:flex; gap:8px; margin-top:6px;">
+            <button id="saveConfig">Save Config</button>
+            <button id="runScan">Run Scan</button>
+            <button id="startWatch" title="Start background watcher">Start Watch</button>
+            <button id="stopWatch" title="Stop background watcher">Stop</button>
+          </div>
+        </div>
         <h3>Views</h3>
         <div id="viewsList"></div>
         <h3>Changed</h3>

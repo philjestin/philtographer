@@ -6,6 +6,9 @@ type Config struct {
 	Root    string      `mapstructure:"root" json:"root" yaml:"root"`
 	Out     string      `mapstructure:"out" json:"out" yaml:"out"`
 	Entries []EntrySpec `mapstructure:"entries" json:"entries" yaml:"entries"`
+	// WatchDirs limits filesystem watching to these subdirectories (relative to Root or absolute).
+	// If empty, we derive watch roots from tsconfig baseUrl/paths. Use this to avoid EMFILE on large monorepos.
+	WatchDirs []string `mapstructure:"watchDirs" json:"watchDirs" yaml:"watchDirs"`
 }
 
 // EntrySpec is a discriminated union. The CLI layer will map these into real providers.
